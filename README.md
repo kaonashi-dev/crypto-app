@@ -6,6 +6,7 @@ on-chain detection via Alchemy WebSockets, partial-payment handling with a grace
 a QR checkout (EIP-681), signed (HMAC) webhooks, and COP balance crediting.
 
 **Stack:** Bun + TypeScript + Hono + Drizzle ORM + PostgreSQL + viem + Alchemy.
+**Checkout UI:** React 19 + Tailwind CSS v4, built with Vite (`./web`), served by the backend.
 
 > See [`docs/OVERVIEW.md`](docs/OVERVIEW.md) for the project's objective and context.
 
@@ -52,8 +53,15 @@ bun run db:generate           # (already versioned under drizzle/) generates mig
 bun run db:migrate            # applies it against Postgres
 bun run seed                  # creates a demo client and prints its API KEY (shown once)
 
-bun run dev                   # API + watchers + workers (hot reload)
+bun run build:web             # builds the React + Tailwind checkout SPA into web/dist
+bun run dev                   # API + watchers + workers (hot reload); serves web/dist at /pay/:id
 ```
+
+**Checkout UI development.** The built SPA is served by the backend at `/pay/:publicId`.
+For a hot-reloading UI dev loop, run the backend (`bun run dev`) and, in another shell,
+the Vite dev server (`bun run dev:web`) on `http://localhost:5173` — it proxies `/api` and
+`/public` to the backend. If you start the backend without building the UI first, `/pay/:id`
+returns a 503 telling you to run `bun run build:web`.
 
 Create a payment:
 
@@ -75,8 +83,9 @@ Verify the testnet token addresses in Circle's docs before use.
 | `POST` | `/api/payments` | `X-Api-Key` | Creates a payment (quote + address + `checkout_url`) |
 | `GET` | `/api/payments/:publicId` | `X-Api-Key` | Payment status |
 | `GET` | `/api/me` | `X-Api-Key` | Name + credited `balance_cop` |
-| `GET` | `/public/payments/:publicId` | — | Public status (for the UI, no merchant data) |
-| `GET` | `/pay/:publicId` | — | Checkout page (QR + polling) |
+| `GET` | `/public/payments/:publicId` | — | Public status, polled by the UI every 3s (no merchant data) |
+| `GET` | `/public/payments/:publicId/checkout` | — | One-shot checkout payload: public view + EIP-681 URI + QR + decimals |
+| `GET` | `/pay/:publicId` | — | Checkout page (React SPA shell) |
 | `GET` | `/health` | — | Liveness |
 
 Amounts are always in the **smallest unit** (`bigint`, serialized as a string): COP
@@ -102,9 +111,11 @@ const ok = timingSafeEqual(Buffer.from(expected), Buffer.from(req.headers["x-gat
 With a migrated Postgres and `DATABASE_URL` pointing at it:
 
 ```bash
+bun run build:web               # required before api-test (it exercises SPA serving)
 bun run scripts/smoke-test.ts   # state machine: partial, complete, overpay, dust, idempotency
-bun run scripts/api-test.ts     # HTTP layer: routing, auth, QR/EIP-681, public endpoint
-bun run typecheck               # tsc --noEmit
+bun run scripts/api-test.ts     # HTTP layer: auth, checkout endpoint (EIP-681/QR), SPA + assets
+bun run typecheck               # backend: tsc --noEmit
+bun run typecheck:web           # frontend: tsc -p web/tsconfig.json
 ```
 
 Neither test touches CoinGecko or the chain: they inject deposits through the same
@@ -127,16 +138,23 @@ src/
     watcher.ts         Alchemy WS -> Transfer events (+ getLogs backfill)
     confirmer.ts       advances confirmations, anti-reorg re-check, settles
     expirer.ts         expires quotes/grace windows + delivers webhooks
-  api/                 auth (X-Api-Key) + Hono routes
-  ui/pay.ts            checkout HTML (QR + polling)
+  api/                 auth (X-Api-Key) + Hono routes (+ serves the checkout SPA)
+web/                   React + Tailwind checkout SPA (Vite)
+  index.html           SPA entry
+  src/
+    main.tsx           React root
+    CheckoutPage.tsx   checkout component: QR, countdown, progress, live polling
+    api.ts             typed client for the public endpoints
+    index.css          Tailwind entry (@import "tailwindcss")
 scripts/
   seed.ts              creates a demo client with an API key
   smoke-test.ts        state-machine test against a real Postgres
-  api-test.ts          HTTP-layer test
+  api-test.ts          HTTP-layer test (+ checkout endpoint & SPA serving)
 drizzle/               versioned SQL migrations
+vite.config.ts         Vite config (root=web, builds to web/dist)
 ```
 
-> The checkout UI (`src/ui/pay.ts`) is intentionally rendered in Spanish, since it is
+> The checkout UI (`web/`) is intentionally rendered in Spanish, since it is
 > end-user–facing copy for payers in the Colombian market.
 
 ## Environment notes

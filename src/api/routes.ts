@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { serveStatic } from "hono/bun";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import QRCode from "qrcode";
@@ -7,9 +8,21 @@ import { NETWORKS, type NetworkId } from "../config";
 import { createPayment } from "../services/payments";
 import { publicPaymentView } from "../services/webhooks";
 import { apiKeyAuth } from "./auth";
-import { renderPayPage } from "../ui/pay";
 
 export const app = new Hono<{ Variables: { client: any } }>();
+
+// Built React + Tailwind checkout SPA (see ./web, built with `bun run build:web`).
+const WEB_DIST = "./web/dist";
+
+/** Builds the EIP-681 payment URI + QR data URL for a payment row. */
+async function buildCheckoutAssets(p: typeof schema.payments.$inferSelect) {
+  const net = NETWORKS[p.network as NetworkId];
+  const token = net.tokens[p.asset as keyof typeof net.tokens];
+  // EIP-681 URI: opens the wallet with token, recipient and amount pre-filled.
+  const uri = `ethereum:${token.address}@${net.chain.id}/transfer?address=${p.address}&uint256=${p.amountCryptoRaw}`;
+  const qrDataUrl = await QRCode.toDataURL(uri, { width: 280, margin: 1 });
+  return { uri, qrDataUrl, decimals: token.decimals };
+}
 
 const createSchema = z.object({
   amount_cop: z.coerce.bigint().positive(),
@@ -70,6 +83,7 @@ app.get("/api/me", apiKeyAuth, (c) => {
 });
 
 // -- Public endpoints for the checkout UI -----------------------------
+// Live status, polled by the SPA every 3s.
 app.get("/public/payments/:publicId", async (c) => {
   const [p] = await db
     .select()
@@ -79,18 +93,29 @@ app.get("/public/payments/:publicId", async (c) => {
   return c.json(publicPaymentView(p)); // no merchant data
 });
 
-app.get("/pay/:publicId", async (c) => {
+// One-shot checkout payload: public payment view + EIP-681 URI + QR + decimals.
+app.get("/public/payments/:publicId/checkout", async (c) => {
   const [p] = await db
     .select()
     .from(schema.payments)
     .where(eq(schema.payments.publicId, c.req.param("publicId")));
-  if (!p) return c.text("Payment not found", 404);
+  if (!p) return c.json({ error: "not_found" }, 404);
+  const { uri, qrDataUrl, decimals } = await buildCheckoutAssets(p);
+  return c.json({
+    payment: publicPaymentView(p),
+    payment_uri: uri,
+    qr_data_url: qrDataUrl,
+    decimals,
+  });
+});
 
-  // EIP-681 URI: opens the wallet with token, recipient and amount pre-filled.
-  const net = NETWORKS[p.network as NetworkId];
-  const token = net.tokens[p.asset as keyof typeof net.tokens];
-  const uri = `ethereum:${token.address}@${net.chain.id}/transfer?address=${p.address}&uint256=${p.amountCryptoRaw}`;
-  const qrDataUrl = await QRCode.toDataURL(uri, { width: 280, margin: 1 });
+// -- Checkout SPA (React + Tailwind, served from ./web/dist) -----------
+app.use("/assets/*", serveStatic({ root: WEB_DIST }));
 
-  return c.html(renderPayPage(publicPaymentView(p), qrDataUrl, uri, token.decimals));
+app.get("/pay/:publicId", async (c) => {
+  const html = await Bun.file(`${WEB_DIST}/index.html`).text().catch(() => null);
+  if (html === null) {
+    return c.text("Checkout UI not built. Run `bun run build:web`.", 503);
+  }
+  return c.html(html);
 });

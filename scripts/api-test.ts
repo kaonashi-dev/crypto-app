@@ -88,14 +88,29 @@ async function main() {
   res = await app.request(`/public/payments/does-not-exist`);
   assert(res.status === 404, "unknown public id -> 404");
 
-  console.log("\n[GET /pay/:id checkout page]");
+  console.log("\n[GET /public/payments/:id/checkout]");
+  res = await app.request(`/public/payments/${p!.publicId}/checkout`);
+  assert(res.status === 200, "checkout payload -> 200");
+  const co = (await res.json()) as any;
+  assert(typeof co.payment_uri === "string" && co.payment_uri.startsWith("ethereum:"), "EIP-681 URI present");
+  assert(co.payment_uri.includes(p!.address), "URI targets the payment address");
+  assert(String(co.qr_data_url).startsWith("data:image/png;base64,"), "QR data URL present");
+  assert(co.decimals === 6, "decimals = 6 for USDC");
+  assert(co.payment.amount_crypto_raw === "12500000", "checkout carries required amount");
+  res = await app.request(`/public/payments/does-not-exist/checkout`);
+  assert(res.status === 404, "unknown checkout -> 404");
+
+  console.log("\n[GET /pay/:id serves the React SPA]");
   res = await app.request(`/pay/${p!.publicId}`);
-  assert(res.status === 200, "checkout page -> 200");
+  assert(res.status === 200, "checkout SPA -> 200");
   const html = await res.text();
-  assert(html.includes("data:image/png;base64,"), "QR data URL embedded");
-  assert(html.includes(p!.address), "address rendered in page");
-  assert(html.includes("12.500000 USDC"), "amount rendered");
-  assert(html.includes(`/public/payments/${p!.publicId}`), "polling endpoint wired");
+  assert(html.includes(`id="root"`), "SPA root mount point present");
+  const assetMatch = html.match(/src="(\/assets\/[^"]+\.js)"/);
+  assert(!!assetMatch, "SPA bundle script referenced");
+  if (assetMatch) {
+    const asset = await app.request(assetMatch[1]!);
+    assert(asset.status === 200, "static /assets bundle served (200)");
+  }
 
   console.log(`\n${failures === 0 ? "ALL PASSED" : failures + " CHECK(S) FAILED"}`);
   await sql.end();
