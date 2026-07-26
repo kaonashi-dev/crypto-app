@@ -1,8 +1,9 @@
 import { createPublicClient, webSocket, http, parseAbiItem } from "viem";
 import { and, inArray, eq } from "drizzle-orm";
 import { db, schema } from "../db";
-import { NETWORKS, type NetworkId } from "../config";
+import { NETWORKS, env, type NetworkId, type EvmNetworkDef } from "../config";
 import { registerDeposit } from "../services/payments";
+import { clearRpcError, logRpcError } from "./rpc-log";
 
 const transferEvent = parseAbiItem(
   "event Transfer(address indexed from, address indexed to, uint256 value)"
@@ -24,7 +25,7 @@ async function activeAddresses(network: NetworkId): Promise<`0x${string}`[]> {
 }
 
 export function startWatcher(network: NetworkId) {
-  const net = NETWORKS[network];
+  const net = NETWORKS[network] as EvmNetworkDef;
   const wsClient = createPublicClient({ chain: net.chain, transport: webSocket(net.wsRpc) });
   const httpClient = createPublicClient({ chain: net.chain, transport: http(net.httpRpc) });
 
@@ -63,7 +64,7 @@ export function startWatcher(network: NetworkId) {
             });
           }
         },
-        onError: (e) => console.error(`[watcher:${network}:${symbol}]`, e.message),
+        onError: (e) => logRpcError(`watcher:${network}:${symbol}`, e),
       });
       unwatchers.push(unwatch);
     }
@@ -71,35 +72,52 @@ export function startWatcher(network: NetworkId) {
   }
 
   // Backfill: covers gaps from WS reconnections.
+  //
+  // Queried in chunks because providers cap the eth_getLogs range (Alchemy's
+  // free tier allows 10 blocks); a single 500-block call fails outright there,
+  // which silently kills the safety net. Both bounds are env-tunable so a paid
+  // plan can widen them — see LOG_RANGE_BLOCKS / BACKFILL_BLOCKS.
   async function backfill() {
     const addrs = await activeAddresses(network);
     if (addrs.length === 0) return;
     const latest = await httpClient.getBlockNumber();
-    const fromBlock = latest > 500n ? latest - 500n : 0n;
+    clearRpcError(`watcher:${network}:backfill`);
+
+    const span = env.backfillBlocks;
+    const chunk = env.logRangeBlocks;
+    const fromBlock = latest > span ? latest - span : 0n;
+
     for (const token of Object.values(net.tokens)) {
-      const logs = await httpClient.getLogs({
-        address: token.address,
-        event: transferEvent,
-        args: { to: addrs },
-        fromBlock,
-        toBlock: latest,
-      });
-      for (const log of logs) {
-        await registerDeposit({
-          network,
-          address: log.args.to!,
-          txHash: log.transactionHash!,
-          logIndex: log.logIndex!,
-          from: log.args.from!,
-          amountRaw: log.args.value!,
-          blockNumber: log.blockNumber!,
-        }); // idempotent: duplicates are dropped by the unique index
+      for (let start = fromBlock; start <= latest; start += chunk) {
+        const end = start + chunk - 1n > latest ? latest : start + chunk - 1n;
+        const logs = await httpClient.getLogs({
+          address: token.address,
+          event: transferEvent,
+          args: { to: addrs },
+          fromBlock: start,
+          toBlock: end,
+        });
+        for (const log of logs) {
+          await registerDeposit({
+            network,
+            address: log.args.to!,
+            txHash: log.transactionHash!,
+            logIndex: log.logIndex!,
+            from: log.args.from!,
+            amountRaw: log.args.value!,
+            blockNumber: log.blockNumber!,
+          }); // idempotent: duplicates are dropped by the unique index
+        }
       }
     }
   }
 
-  resubscribe().catch((e) => console.error(`[watcher:${network}] resubscribe`, e));
-  backfill().catch((e) => console.error(`[watcher:${network}] backfill`, e));
-  setInterval(() => resubscribe().catch((e) => console.error(`[watcher:${network}]`, e)), 15_000);
-  setInterval(() => backfill().catch((e) => console.error(`[watcher:${network}]`, e)), 60_000);
+  const onResubscribeError = (e: unknown) => logRpcError(`watcher:${network}:resubscribe`, e);
+  const onBackfillError = (e: unknown) => logRpcError(`watcher:${network}:backfill`, e);
+
+  resubscribe().catch(onResubscribeError);
+  backfill().catch(onBackfillError);
+  // resubscribe only touches the DB, so its cadence is free; backfill is metered.
+  setInterval(() => resubscribe().catch(onResubscribeError), 15_000);
+  setInterval(() => backfill().catch(onBackfillError), env.backfillSec * 1000);
 }

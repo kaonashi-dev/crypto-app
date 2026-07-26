@@ -1,18 +1,24 @@
-import { createPublicClient, http } from "viem";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db";
-import { NETWORKS, env, type NetworkId, type EvmNetworkDef } from "../config";
+import { NETWORKS, env, type NetworkId, type TronNetworkDef } from "../config";
 import { confirmDeposit } from "../services/payments";
+import { getNowBlock, getTransactionInfo } from "../services/tron";
 import { clearRpcError, logRpcError } from "./rpc-log";
 
-export function startConfirmer(network: NetworkId) {
-  const net = NETWORKS[network] as EvmNetworkDef;
-  const client = createPublicClient({ chain: net.chain, transport: http(net.httpRpc) });
+
+/**
+ * Advances Tron deposits to confirmed once they are deep enough, re-checking
+ * the transaction first so a dropped one is unwound — same contract as the EVM
+ * confirmer, over TronGrid's HTTP API instead of viem.
+ */
+export function startTronConfirmer(network: NetworkId) {
+  const net = NETWORKS[network] as TronNetworkDef;
+  const scope = `tron-confirmer:${network}`;
 
   setInterval(async () => {
     try {
-      // Ask the DB (free, local) before the RPC (metered): with nothing pending
-      // there is no reason to learn the block height at all.
+      // Ask the DB (free, local) before TronGrid (rate-limited): with nothing
+      // pending there is no reason to learn the block height at all.
       const rows = await db
         .select()
         .from(schema.deposits)
@@ -21,21 +27,19 @@ export function startConfirmer(network: NetworkId) {
         );
       if (rows.length === 0) return;
 
-      const latest = await client.getBlockNumber();
-      clearRpcError(`confirmer:${network}`);
+      const latest = await getNowBlock(net);
+      clearRpcError(scope);
 
       for (const dep of rows) {
         if (dep.blockNumber + net.confirmations > latest) continue; // not mature yet
 
         // Anti-reorg check: is the tx still mined and successful?
-        const receipt = await client
-          .getTransactionReceipt({ hash: dep.txHash as `0x${string}` })
-          .catch(() => null);
-        if (!receipt || receipt.status !== "success") {
-          // The tx vanished or failed after a reorg -> clean up the deposit.
+        const info = await getTransactionInfo(net, dep.txHash).catch(() => null);
+        const ok = info && (!info.receipt?.result || info.receipt.result === "SUCCESS");
+        if (!ok) {
+          // The tx vanished or failed -> unwind the deposit.
           await db.transaction(async (tx) => {
             await tx.delete(schema.deposits).where(eq(schema.deposits.id, dep.id));
-            // return the amount to the payment's pendingRaw
             const [p] = await tx
               .select()
               .from(schema.payments)
@@ -54,7 +58,7 @@ export function startConfirmer(network: NetworkId) {
         await confirmDeposit(dep.id);
       }
     } catch (e) {
-      logRpcError(`confirmer:${network}`, e);
+      logRpcError(scope, e);
     }
   }, env.confirmerSec * 1000);
 }

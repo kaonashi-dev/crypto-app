@@ -1,12 +1,12 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
+import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
 
-// The checkout SPA lives in ./web and builds to ./web/dist, which the Hono
-// backend serves at /pay/:publicId (+ /assets/*).
+// The SPA lives in ./web and builds to ./web/dist, which the Hono backend serves
+// at /pay/:publicId (checkout) and /admin (internal console), plus /assets/*.
 export default defineConfig({
   root: "web",
-  plugins: [react(), tailwindcss()],
+  plugins: [solid(), tailwindcss()],
   build: {
     outDir: "dist",
     emptyOutDir: true,
@@ -17,6 +17,9 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:3000",
       "/public": "http://localhost:3000",
+      // Only the data routes: bare /admin must stay with Vite's SPA fallback so
+      // the console hot-reloads like the checkout does.
+      "/admin/api": "http://localhost:3000",
     },
   },
 });
