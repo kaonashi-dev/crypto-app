@@ -84,6 +84,9 @@ gateway solves together:
 - On-chain watcher / confirmer / expirer workers; HMAC-signed webhooks with retries; a
   COP balance plus an audit ledger.
 - Merchant REST API (`X-Api-Key`) and a hosted checkout page.
+- A **read-only internal backoffice console** (`/admin`) for inspecting transactions:
+  payment list with filtering and transaction-hash search, per-payment drill-down into
+  on-chain deposits / webhook attempts / ledger credits, and a flat deposit feed.
 
 **Out of scope (deferred to later phases):**
 
@@ -91,8 +94,10 @@ gateway solves together:
   KMS/HSM).
 - BTC (via BTCPay Server) and USDT TRC-20 (via TronGrid) — the watcher architecture is
   designed to plug these in as new watchers.
-- Multi-source price medians, rate limiting, API-key rotation, and an admin panel for
-  resolving `underpaid_expired` payments.
+- Multi-source price medians, rate limiting, and API-key rotation.
+- Authentication for the backoffice console, and the write actions it deliberately omits:
+  resolving `underpaid_expired` payments (a refund or manual credit, so it moves balances)
+  and re-queueing webhook jobs that exhausted their 8 attempts.
 - Legal/regulatory evaluation (Colombia PSAV/DIAN) required before handling real
   third-party funds.
 

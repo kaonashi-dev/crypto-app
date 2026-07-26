@@ -1,1 +1,134 @@
 @import "tailwindcss";
+
+/**
+ * One type system, two registers.
+ *
+ * Archivo carries every interface label on both surfaces; IBM Plex Mono carries
+ * anything that must be transcribed exactly (addresses, hashes, raw amounts, the
+ * clock). Bodoni Moda appears on the checkout only, and only on the COP amount:
+ * a didone is the engraved register of printed money, and holding it to one
+ * number keeps it a statement rather than a texture.
+ */
+@theme {
+  --font-sans: "Archivo Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bodoni Moda Variable", ui-serif, Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/**
+ * Checkout palette (the payer-facing page at /pay/:publicId).
+ *
+ * Drawn from the inks of a Colombian $50.000 note — aubergine, security-thread
+ * ochre, a violet-tinted paper rather than white — because the charge is
+ * denominated in COP and the payer is Colombian. Printed, matte, no gradients:
+ * the page should read as an issued payment order, not a fintech dashboard.
+ *
+ * Every value below clears 4.5:1 against --color-paper as text. `gold-bar` is
+ * the one exception and is never used for text — fills and rules only.
+ */
+@theme {
+  --color-paper: #efebf2; /* page ground */
+  --color-paper-2: #e4deeb; /* recessed surface: QR mat, copy fields */
+  --color-rule: #cdc3d9; /* hairlines */
+  --color-print: #241c2e; /* primary ink */
+  --color-print-2: #574a6b; /* secondary text */
+  --color-print-3: #6e6283; /* labels, captions */
+
+  --color-violet: #4c2e72; /* principal ink: primary action, live quote */
+  --color-gold: #855d12; /* grace window — text-safe */
+  --color-gold-bar: #b98523; /* grace window — fills only */
+  --color-pine: #1b6647; /* paid */
+  --color-carmine: #9e2b2b; /* expired, underpaid */
+}
+
+/**
+ * Console palette (the /admin backoffice only). Dark on purpose: the console is
+ * never mistaken for the payer-facing checkout, and it is read while waiting on
+ * block confirmations.
+ *
+ * The four status hues are validated status roles, not hand-picked: they clear
+ * 3:1 against the #1a1a19 panel and stay distinct under deuteranopia and
+ * protanopia. A status colour is always paired with its label, never carried by
+ * hue alone. Do not substitute values here without re-validating contrast.
+ */
+@theme {
+  --color-plane: #0d0d0d; /* page ground */
+  --color-panel: #1a1a19; /* raised surface */
+  --color-hairline: #2c2c2a; /* row + panel rules */
+  --color-baseline: #383835; /* meter troughs, stronger dividers */
+  --color-ink: #ffffff;
+  --color-ink-2: #c3c2b7; /* secondary text */
+  --color-ink-3: #898781; /* labels, axis, neutral status */
+
+  --color-ok: #0ca30c; /* paid */
+  --color-warn: #fab219; /* detecting */
+  --color-serious: #ec835a; /* partially_paid */
+  --color-critical: #d03b3b; /* underpaid_expired */
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  /* Bodoni's hairlines only hold up above ~28px, which is the only size it is
+     ever set at here. Optical sizing keeps them from thinning further. */
+  .font-display {
+    font-optical-sizing: auto;
+    font-variant-numeric: lining-nums tabular-nums;
+  }
+}
+
+/**
+ * Checkout page-load sequence.
+ *
+ * One orchestrated moment, not scattered effects: the amounts rise, then the
+ * rate rule draws between them. Everything after load is quiet.
+ */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes draw {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes press {
+  from {
+    opacity: 0;
+    transform: rotate(-2.5deg) scale(1.08);
+  }
+}
+
+.anim-rise {
+  animation: rise 520ms cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+}
+
+.anim-draw {
+  transform-origin: left;
+  animation: draw 640ms cubic-bezier(0.3, 0.8, 0.4, 1) 160ms backwards;
+}
+
+/* The paid stamp: one press, on arrival. */
+.anim-press {
+  animation: press 420ms cubic-bezier(0.2, 1.4, 0.5, 1) backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-rise,
+  .anim-draw,
+  .anim-press {
+    animation: none;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+  }
+}

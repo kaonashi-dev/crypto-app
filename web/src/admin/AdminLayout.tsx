@@ -1,0 +1,152 @@
+import { createEffect, onCleanup, type JSX } from "solid-js";
+import { Link, Outlet, useRouterState } from "@tanstack/solid-router";
+import { useIsFetching, useQueryClient } from "@tanstack/solid-query";
+import {
+  CLOCK_IDLE_MS,
+  CLOCK_LIVE_MS,
+  live,
+  loadedAt,
+  REFRESH_MS,
+  setLive,
+  setLoadedAt,
+  setNow,
+} from "./console";
+
+function NavLink(props: { to: string; active: boolean; children: JSX.Element }) {
+  return (
+    <Link
+      to={props.to}
+      aria-current={props.active ? "page" : undefined}
+      class={`-mb-px border-b-2 px-1 pb-2.5 text-[0.82rem] transition-colors focus-visible:ring-2 focus-visible:ring-ink-2 focus-visible:outline-none ${
+        props.active
+          ? "border-ink text-ink"
+          : "border-transparent text-ink-3 hover:border-baseline hover:text-ink-2"
+      }`}
+    >
+      {props.children}
+    </Link>
+  );
+}
+
+export function AdminLayout() {
+  const queryClient = useQueryClient();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const fetching = useIsFetching();
+
+  const onPayments = () => !pathname().startsWith("/admin/deposits");
+
+  // The relative timestamps in every table need a clock of their own. It ticks
+  // slowly while auto-refresh is off: precise seconds against a snapshot would
+  // be false precision, and a 1s tick would re-render every row for nothing.
+  createEffect(() => {
+    const id = setInterval(
+      () => setNow(Date.now()),
+      live() ? CLOCK_LIVE_MS : CLOCK_IDLE_MS
+    );
+    onCleanup(() => clearInterval(id));
+  });
+
+  /**
+   * Advance the clock whenever data lands, and record when that was.
+   *
+   * Pinning `now` to the moment of the fetch keeps it at or ahead of every
+   * timestamp just returned — otherwise a row created seconds ago renders as
+   * "in 0m 04s" whenever the clock is mid-interval, which on the 30s idle tick
+   * is most of the time.
+   */
+  const cache = queryClient.getQueryCache();
+  const unsubscribe = cache.subscribe(() => {
+    const latest = cache
+      .getAll()
+      .reduce((max, query) => Math.max(max, query.state.dataUpdatedAt), 0);
+    if (latest > 0) {
+      setLoadedAt(latest);
+      setNow(Date.now());
+    }
+  });
+  onCleanup(unsubscribe);
+
+  return (
+    <div class="min-h-screen bg-plane font-sans text-ink antialiased">
+      <header class="sticky top-0 z-20 border-b border-hairline bg-plane/95 backdrop-blur">
+        <div class="mx-auto flex max-w-[1500px] flex-wrap items-end justify-between gap-4 px-4 pt-4 sm:px-6">
+          <div class="flex items-end gap-7">
+            <Link
+              to="/admin"
+              class="pb-2.5 focus-visible:ring-2 focus-visible:ring-ink-2 focus-visible:outline-none"
+            >
+              <span class="block text-[0.66rem] tracking-[0.2em] text-ink-3 uppercase">
+                Crypto gateway
+              </span>
+              <span class="block text-[0.95rem] leading-tight text-ink">Console</span>
+            </Link>
+            <nav class="flex items-end gap-5" aria-label="Views">
+              <NavLink to="/admin" active={onPayments()}>
+                Payments
+              </NavLink>
+              <NavLink to="/admin/deposits" active={!onPayments()}>
+                Deposits
+              </NavLink>
+            </nav>
+          </div>
+
+          <div class="flex items-center gap-3 pb-2.5">
+            {/* Absolute fetch time, not a relative one: a snapshot's age is only
+                as accurate as the clock, and "data 04:57:12" can never read as a
+                time in the future the way a lagging relative label can. */}
+            <span
+              class="font-mono text-[0.7rem] text-ink-3 tabular-nums"
+              title={
+                live()
+                  ? `Refetched every ${REFRESH_MS / 1000}s`
+                  : "Snapshot — press Refresh to update"
+              }
+            >
+              {loadedAt()
+                ? `data ${new Date(loadedAt()!).toLocaleTimeString("en-GB")}`
+                : "loading…"}
+            </span>
+            <button
+              type="button"
+              onClick={() => queryClient.refetchQueries()}
+              disabled={fetching() > 0}
+              class="cursor-pointer rounded border border-hairline px-2.5 py-1 text-[0.75rem] text-ink-3 transition-colors hover:border-baseline hover:text-ink disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ink-2 focus-visible:outline-none"
+            >
+              {fetching() > 0 ? "Refreshing…" : "Refresh"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setLive(!live())}
+              aria-pressed={live()}
+              title={
+                live()
+                  ? `Auto-refresh on — refetching every ${REFRESH_MS / 1000}s`
+                  : "Auto-refresh off — nothing is fetched until you press Refresh or turn this on"
+              }
+              class="flex cursor-pointer items-center gap-2 rounded border border-hairline px-2.5 py-1 text-[0.75rem] transition-colors hover:border-baseline focus-visible:ring-2 focus-visible:ring-ink-2 focus-visible:outline-none"
+            >
+              <span
+                aria-hidden
+                class={`inline-block h-[7px] w-[7px] rounded-full ${
+                  live() ? "bg-ok motion-safe:animate-pulse" : "border-[1.5px] border-ink-3"
+                }`}
+              />
+              <span class={live() ? "text-ink-2" : "text-ink-3"}>
+                {live() ? "Live" : "Auto-refresh off"}
+              </span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main class="mx-auto max-w-[1500px] px-4 py-5 sm:px-6">
+        <Outlet />
+      </main>
+
+      <footer class="mx-auto max-w-[1500px] px-4 pb-8 text-[0.7rem] leading-relaxed text-ink-3 sm:px-6">
+        Read-only internal console — no authentication. Do not expose this port outside your
+        machine.
+      </footer>
+    </div>
+  );
+}

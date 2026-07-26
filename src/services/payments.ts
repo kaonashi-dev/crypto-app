@@ -1,7 +1,7 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { db, schema } from "../db";
-import { NETWORKS, env, type NetworkId } from "../config";
+import { tokenFor, env, type NetworkId } from "../config";
 import { getRateCopE6, copToRaw } from "./rates";
 import { reserveDerivationIndex, deriveAddress } from "./wallet";
 import { enqueueWebhook } from "./webhooks";
@@ -12,19 +12,18 @@ const nano = customAlphabet("abcdefghijkmnpqrstuvwxyz23456789", 14);
 export async function createPayment(input: {
   clientId: string;
   amountCop: bigint;
-  asset: string; // 'USDC'
-  network: NetworkId; // 'eth-sepolia' | 'base-sepolia'
+  asset: string; // 'USDC' | 'USDT'
+  network: NetworkId; // 'eth-sepolia' | 'base-sepolia' | 'tron-nile'
   metadata?: unknown;
 }) {
-  const net = NETWORKS[input.network];
-  const token = net?.tokens[input.asset as keyof typeof net.tokens];
+  const token = tokenFor(input.network, input.asset);
   if (!token) throw new Error("Unsupported asset/network combination");
   if (input.amountCop < 1000n) throw new Error("Minimum amount: 1,000 COP");
 
   const rate = await getRateCopE6(input.asset);
   const amountCryptoRaw = copToRaw(input.amountCop, rate, token.decimals);
   const derivationIndex = await reserveDerivationIndex();
-  const address = deriveAddress(derivationIndex);
+  const address = deriveAddress(derivationIndex, input.network);
 
   const [payment] = await db
     .insert(schema.payments)
@@ -197,6 +196,10 @@ export async function confirmDeposit(depositId: string) {
 // -- Expire windows (called by the expirer) ---------------------------
 export async function expireStalePayments() {
   const now = new Date();
+  // Comparisons go through drizzle's operators, not a raw `sql` template: a
+  // template binds the Date as-is and the pg driver rejects it, which used to
+  // make this whole worker throw on every tick (nothing ever expired).
+  //
   // No funds and quote expired -> expired
   const expired = await db
     .update(schema.payments)
@@ -204,7 +207,7 @@ export async function expireStalePayments() {
     .where(
       and(
         eq(schema.payments.status, "pending"),
-        sql`${schema.payments.quoteExpiresAt} < ${now}`
+        lt(schema.payments.quoteExpiresAt, now)
       )
     )
     .returning();
@@ -215,8 +218,9 @@ export async function expireStalePayments() {
     .set({ status: "underpaid_expired", updatedAt: now })
     .where(
       and(
-        sql`${schema.payments.status} IN ('detecting', 'partially_paid')`,
-        sql`${schema.payments.graceExpiresAt} IS NOT NULL AND ${schema.payments.graceExpiresAt} < ${now}`
+        inArray(schema.payments.status, ["detecting", "partially_paid"]),
+        isNotNull(schema.payments.graceExpiresAt),
+        lt(schema.payments.graceExpiresAt, now)
       )
     )
     .returning();

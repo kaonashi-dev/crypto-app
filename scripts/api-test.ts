@@ -42,7 +42,7 @@ async function main() {
       network: "base-sepolia",
       amountCryptoRaw: copToRaw(50_000n, 4_000_000_000n, 6),
       rateCopPerUnitE6: 4_000_000_000n,
-      address: deriveAddress(idx),
+      address: deriveAddress(idx, "base-sepolia"),
       derivationIndex: idx,
       quoteExpiresAt: new Date(Date.now() + 15 * 60_000),
       metadata: JSON.stringify({ order_id: "ORD-001" }),
@@ -100,7 +100,7 @@ async function main() {
   res = await app.request(`/public/payments/does-not-exist/checkout`);
   assert(res.status === 404, "unknown checkout -> 404");
 
-  console.log("\n[GET /pay/:id serves the React SPA]");
+  console.log("\n[GET /pay/:id serves the SPA]");
   res = await app.request(`/pay/${p!.publicId}`);
   assert(res.status === 200, "checkout SPA -> 200");
   const html = await res.text();
