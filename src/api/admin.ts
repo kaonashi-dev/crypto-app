@@ -18,8 +18,19 @@
 import { Hono } from "hono";
 import { and, count, desc, eq, ilike, inArray, or, sql, sum } from "drizzle-orm";
 import { db, schema } from "../db";
-import { NETWORKS, env, tokenFor, type NetworkId } from "../config";
+import { NETWORKS, env, tokenFor, configSummary, missingCredential, type NetworkId } from "../config";
 import { requiredWithTolerance } from "../services/payments";
+import { rateCacheState } from "../services/rates";
+import {
+  recentLogs,
+  loggingConfig,
+  otlpStatus,
+  processStats,
+  snapshot,
+  resource,
+  LEVELS,
+  type Level,
+} from "../observability";
 
 export const adminApi = new Hono();
 
@@ -370,6 +381,58 @@ adminApi.get("/payments/:publicId", async (c) => {
     })),
   });
 });
+
+// -- GET /admin/api/logs -----------------------------------------------
+// The process's own log tail, filterable. Testing a payment means following it
+// across an HTTP request, a chain watcher and a confirmer, and the terminal
+// holding that output is usually not the one you are testing from — a deployed
+// container has none at all. Records are already redacted by the logging
+// service; this is the same ADMIN_PASSWORD-gated surface as the rest.
+//
+//   ?level=warn        minimum severity
+//   ?scope=watcher     scope prefix (watcher, payments, http, db, …)
+//   ?q=abc123          substring over body, scope and attribute values
+//   ?since=1234        only records after this sequence number (polling)
+//   ?limit=200
+adminApi.get("/logs", (c) => {
+  const q = c.req.query();
+  const level =
+    q.level && q.level.toLowerCase() in LEVELS ? (q.level.toLowerCase() as Level) : undefined;
+
+  return c.json({
+    ...recentLogs({
+      level,
+      scope: q.scope?.trim() || undefined,
+      q: q.q,
+      since: q.since ? Number(q.since) : undefined,
+      limit: q.limit ? Number(q.limit) : undefined,
+    }),
+    levels: Object.keys(LEVELS),
+    config: loggingConfig(),
+  });
+});
+
+// -- GET /admin/api/diagnostics ----------------------------------------
+// Everything about the running process that is not a database row: the
+// configuration in force, counters and timings since boot, the pricing caches,
+// and where logs are being exported. The questions this answers — "is the
+// watcher actually running", "how many provider calls did that test cost",
+// "which rate is frozen in the cache" — are otherwise only answerable by
+// reading the deployment's environment.
+adminApi.get("/diagnostics", (c) =>
+  c.json({
+    service: resource,
+    process: processStats(),
+    config: configSummary(),
+    networks: Object.keys(NETWORKS).map((id) => ({
+      ...networkMeta(id),
+      enabled: !missingCredential(id as NetworkId),
+    })),
+    logging: { ...loggingConfig(), otlp: otlpStatus() },
+    rates: rateCacheState(),
+    metrics: snapshot(),
+  })
+);
 
 // -- GET /admin/api/deposits -------------------------------------------
 // Flat feed of every Transfer the watchers have recorded, newest first. This is

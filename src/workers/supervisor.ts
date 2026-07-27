@@ -6,6 +6,7 @@ import { startTronWatcher } from "./tron-watcher";
 import { startTronConfirmer } from "./tron-confirmer";
 import { getNowBlock } from "../services/tron";
 import { logRpcError } from "./rpc-log";
+import { getLogger, withContext, count, gauge, observe } from "../observability";
 
 const PROBE_RETRY_MS = 60_000;
 // A network that stays unreachable is usually a config gap someone has to fix
@@ -48,27 +49,51 @@ function driver(network: NetworkId) {
  */
 export function superviseNetwork(network: NetworkId): void {
   const { probe, start } = driver(network);
-  const scope = `gateway:${network}`;
-  let warned = false;
+  const scope = `supervisor:${network}`;
+  const log = getLogger(scope, { "chain.network": network });
+  const net = NETWORKS[network];
+  let attempt = 0;
   let retryMs = PROBE_RETRY_MS;
 
   async function run(): Promise<void> {
-    try {
-      await probe();
-    } catch (e) {
-      logRpcError(scope, e);
-      if (!warned) {
-        warned = true;
-        console.warn(`[${scope}] workers paused — retrying, backing off to ${PROBE_RETRY_MAX_MS / 60_000} min`);
+    // One trace per probe attempt, so the probe, its failure and the workers it
+    // starts all correlate.
+    await withContext({ attributes: { "chain.network": network } }, async () => {
+      attempt++;
+      const started = performance.now();
+      let height: bigint;
+      try {
+        height = await probe();
+        observe("chain.probe.duration", performance.now() - started, { network });
+      } catch (e) {
+        observe("chain.probe.duration", performance.now() - started, { network });
+        count("chain.probe.failures", { network });
+        gauge("chain.up", 0, { network });
+        logRpcError(scope, e);
+        log.repeat("paused", "warn", "workers paused — RPC unreachable, retrying", {
+          "chain.probe.attempt": attempt,
+          "chain.probe.retry_in_s": Math.round(retryMs / 1000),
+          "chain.probe.max_backoff_min": PROBE_RETRY_MAX_MS / 60_000,
+        });
+        setTimeout(run, retryMs);
+        retryMs = Math.min(retryMs * 2, PROBE_RETRY_MAX_MS);
+        return;
       }
-      setTimeout(run, retryMs);
-      retryMs = Math.min(retryMs * 2, PROBE_RETRY_MAX_MS);
-      return;
-    }
 
-    console.log(`[${scope}] RPC reachable — starting watcher + confirmer`);
-    start();
+      gauge("chain.up", 1, { network });
+      gauge("chain.height", Number(height), { network });
+      log.resolved("paused", "rpc reachable again");
+      log.info("RPC reachable — starting watcher + confirmer", {
+        "chain.family": net.family,
+        "chain.height": height,
+        "chain.confirmations_required": net.confirmations,
+        "chain.probe.attempt": attempt,
+        "chain.probe.duration_ms": Math.round(performance.now() - started),
+      });
+      start();
+    });
   }
 
+  log.debug("supervising", { "chain.family": net.family });
   void run();
 }

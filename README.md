@@ -48,13 +48,14 @@ State machine: `pending → detecting → partially_paid → paid`, with branche
   enabled on the app
 - For `tron-nile`: nothing — TronGrid serves the public testnet without a key. Set
   `TRONGRID_API_KEY` only if you hit the per-IP rate limit.
-- A **new** testnet mnemonic
+- A **new** mnemonic, generated for this gateway alone (`bun run mnemonic:new`)
 
 ## Getting started
 
 ```bash
 bun install
-cp .env.example .env          # fill in ALCHEMY_* and HD_MNEMONIC
+cp .env.example .env          # fill in ALCHEMY_*
+bun run mnemonic:new --write  # generates HD_MNEMONIC into .env without printing it
 
 # Start Postgres with Docker. DATABASE_URL in .env already points at localhost:5433.
 bun run db:up
@@ -104,6 +105,11 @@ gateway; you only need TRX in the receiving account when you later sweep funds o
 
 ## API
 
+> [`docs/HTTPIE.md`](docs/HTTPIE.md) walks the whole lifecycle — create, pay, settle, inspect
+> — as runnable HTTPie commands, including the console's filters and the money-as-strings rule.
+> [`docs/crypto-gateway.postman_collection.json`](docs/crypto-gateway.postman_collection.json)
+> is the same surface as an importable collection (HTTPie Desktop / Postman / Insomnia / Bruno).
+
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/api/payments` | `X-Api-Key` | Creates a payment (quote + address + `checkout_url`) |
@@ -113,12 +119,12 @@ gateway; you only need TRX in the receiving account when you later sweep funds o
 | `GET` | `/public/payments/:publicId/checkout` | — | One-shot checkout payload: public view + QR + `payment_uri` + `wallet_uri` + `decimals` + `family` + `quote_ttl_sec`/`grace_ttl_sec` |
 | `GET` | `/pay/:publicId` | — | Checkout page (SPA shell) |
 | `GET` | `/health` | — | Liveness |
-| `GET` | `/admin`, `/admin/deposits`, `/admin/p/:publicId` | — | Backoffice console (SPA shell) |
-| `GET` | `/admin/api/stats` | — | Status counts, queue health, live business parameters |
-| `GET` | `/admin/api/payments` | — | Payment list — `status`, `network`, `asset`, `client_id`, `q`, `limit`, `offset` |
-| `GET` | `/admin/api/payments/:publicId` | — | One payment plus its deposits, webhook attempts and ledger entries |
-| `GET` | `/admin/api/deposits` | — | Flat deposit feed — `network`, `confirmed`, `q` |
-| `GET` | `/admin/api/clients` | — | Merchants with balances and payment counts |
+| `GET` | `/admin`, `/admin/deposits`, `/admin/p/:publicId` | Basic | Backoffice console (SPA shell) |
+| `GET` | `/admin/api/stats` | Basic | Status counts, queue health, live business parameters |
+| `GET` | `/admin/api/payments` | Basic | Payment list — `status`, `network`, `asset`, `client_id`, `q`, `limit`, `offset` |
+| `GET` | `/admin/api/payments/:publicId` | Basic | One payment plus its deposits, webhook attempts and ledger entries |
+| `GET` | `/admin/api/deposits` | Basic | Flat deposit feed — `network`, `confirmed`, `q` |
+| `GET` | `/admin/api/clients` | Basic | Merchants with balances and payment counts |
 
 Amounts are always in the **smallest unit** (`bigint`, serialized as a string): COP
 without decimals, crypto in raw token units (USDC and USDT = 6 decimals). Never floats
@@ -318,7 +324,7 @@ configuration to maintain.
 | Variable | Value |
 |---|---|
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` — a reference, so it tracks the database service |
-| `HD_MNEMONIC` | a **new** testnet mnemonic, quoted |
+| `HD_MNEMONIC` | its own mnemonic from `bun run mnemonic:new`, quoted — not the one your local `.env` uses, and not a published test phrase |
 | `ADMIN_PASSWORD` | a generated password; the boot refuses to start in production without it |
 | `ALCHEMY_SEPOLIA_KEY` | your Alchemy key, if you want that network detected |
 | `ALCHEMY_BASE_SEPOLIA_KEY` | likewise, for Base Sepolia |
@@ -378,6 +384,18 @@ bills for wall-clock time.
 - The boot preflight (`preflight()` in `src/config.ts`) exits on a missing `DATABASE_URL`,
   `HD_MNEMONIC`, or — in production — `ADMIN_PASSWORD`, rather than letting the gap surface
   later inside a request or a worker tick. `SIGTERM` drains the Postgres pool before exit.
+- The same preflight exits on an `HD_MNEMONIC` that fails its BIP-39 checksum, and on one
+  of the published test mnemonics whenever any registered network is not a testnet — that
+  pairing means every address the gateway hands a payer has a private key in a README
+  somewhere. On testnets it is a warning instead, since that is a legitimate way to work.
+- **One database, one tree.** `hd_counter` stores the BIP-32 fingerprint of the mnemonic
+  that issued its indexes, and `reserveDerivationIndex` will not issue from any other, so a
+  swapped `HD_MNEMONIC` fails at boot (and at the next payment) instead of quietly
+  continuing the sequence into addresses the previous seed owns. Rotating on purpose means
+  rotating both: a fresh database, or — on a testnet, where the orphaned addresses hold
+  nothing worth recovering — `UPDATE hd_counter SET seed_fingerprint = NULL WHERE id = 1`
+  before the first boot on the new seed. Addresses already handed to payers keep deriving
+  from the old mnemonic either way; that is what makes this a decision and not a setting.
 
 ## Provider cost
 

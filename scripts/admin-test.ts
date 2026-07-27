@@ -6,6 +6,7 @@
  * every console endpoint reports them, that filters and search work, and that no
  * bigint escapes as a JSON number.
  */
+import "./quiet"; // must precede every ../src import
 import { randomBytes } from "crypto";
 import { app } from "../src/api/routes";
 import { db, schema, sql } from "../src/db";
@@ -271,6 +272,59 @@ async function main() {
   );
   r = await json(`/admin/api/deposits?confirmed=true&q=${pendingTx}`);
   assert(r.body.deposits.length === 0, "confirmed=true excludes it");
+
+  console.log("\n[GET /admin/api/diagnostics]");
+  r = await json("/admin/api/diagnostics");
+  assert(r.status === 200, "diagnostics -> 200");
+  assert(r.body.service?.["service.name"] === "crypto-gateway", "service resource attributes present");
+  assert(typeof r.body.process?.uptime_s === "number", "process uptime reported");
+  assert(r.body.config?.["config.dust_bps"] === Number(env.dustBps), "live dust tolerance reported");
+  assert(
+    r.body.networks?.length === 3 && r.body.networks.every((n: any) => "enabled" in n),
+    "every network reported with its enabled flag"
+  );
+  assert(typeof r.body.logging?.level === "string", "effective log level reported");
+  assert(r.body.metrics?.counters !== undefined, "metric counters present");
+  // The pool was created and queried by this very script.
+  assert(Number(r.body.metrics.counters["db.queries"] ?? 0) > 0, "db queries counted");
+
+  console.log("\n[GET /admin/api/logs]");
+  r = await json("/admin/api/logs?limit=50");
+  assert(r.status === 200, "logs -> 200");
+  assert(Array.isArray(r.body.records) && r.body.records.length > 0, "log tail returns records");
+  assert(
+    r.body.records.every((l: any) => l.time && l.level && l.scope),
+    "every record carries time, level and scope"
+  );
+  // The requests this script has already made are in the buffer.
+  r = await json("/admin/api/logs?scope=http&limit=50");
+  assert(
+    r.body.records.length > 0 && r.body.records.every((l: any) => l.scope.startsWith("http")),
+    "scope filter narrows to one module"
+  );
+  r = await json("/admin/api/logs?level=error&limit=50");
+  assert(
+    r.body.records.every((l: any) => l.level === "ERROR" || l.level === "FATAL"),
+    "level filter keeps only that severity and above"
+  );
+  // `url.path` is an attribute, not part of the message, so this only passes if
+  // the search reads attribute values. The 404 probes above put it in the buffer
+  // at WARN, which is the level this script runs the services at (see ./quiet).
+  r = await json("/admin/api/logs?q=does-not-exist&limit=50");
+  assert(
+    r.body.records.length > 0 &&
+      r.body.records.every((l: any) => JSON.stringify(l.attributes).includes("does-not-exist")),
+    "text search matches attribute values"
+  );
+  const cursor = r.body.cursor;
+  r = await json(`/admin/api/logs?since=${cursor}&limit=50`);
+  assert(
+    r.body.records.every((l: any) => l.seq > cursor),
+    "since= returns only newer records"
+  );
+  // The log tail must never become a way to read the environment's secrets.
+  const logDump = await (await get("/admin/api/logs?limit=200")).text();
+  assert(!logDump.includes(env.mnemonic.slice(0, 24)), "mnemonic never reaches the log tail");
 
   console.log("\n[no bigint leaks as JSON numbers]");
   const raw = await (await get(`/admin/api/payments/${p!.publicId}`)).text();
