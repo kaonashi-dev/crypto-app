@@ -1,0 +1,1 @@
+ALTER TABLE "hd_counter" ADD COLUMN "seed_fingerprint" text;

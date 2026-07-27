@@ -1,0 +1,318 @@
+{
+  "info": {
+    "_postman_id": "322075cf-933d-4db2-a766-21b3b5b58c2d",
+    "name": "Crypto gateway (COP -> USDC/USDT)",
+    "description": "Every endpoint of the crypto payment gateway, ordered as you would actually drive it: create a charge, watch it settle, then inspect it from the operator console.\n\nImport into HTTPie Desktop (Postman v2.1 is its interchange format), Postman, Insomnia or Bruno.\n\nSET THESE FIRST — collection variables:\n\n- `baseUrl` — defaults to the deployed instance. Use `http://localhost:3000` for local.\n- `apiKey` — from `bun run seed`, printed once. Required by the Merchant API folder.\n- `adminPassword` — the service's `ADMIN_PASSWORD`. Required by the Console folder.\n- `publicId` — leave empty. \"Create payment\" writes it automatically, so every later request follows the payment you just made.\n\nAuth is set per folder, not per request: Merchant API sends `X-Api-Key`, Console uses HTTP Basic, and the public checkout routes send nothing.\n\nMoney is always a string. COP has no decimals and token amounts are in smallest units (USDC and USDT both have 6), so `\"15691642\"` means 15.691642 USDT. Parsing those as JSON numbers loses precision silently, which is why they are never emitted bare.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://crypto-app-production-e3b5.up.railway.app",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "adminUser",
+      "value": "admin",
+      "type": "string"
+    },
+    {
+      "key": "adminPassword",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "publicId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["health"]
+        },
+        "description": "Liveness. No auth, and deliberately does not touch Postgres — it reports that the process is serving, not that the database is reachable, so a brief database blip cannot cascade into a restart loop.\n\nThe consequence worth knowing: this stays 200 even when every database-backed route is failing. To check the database, call a route that reads it — \"Payment status (public)\" returning 404 for an unknown id proves a query reached Postgres and came back empty."
+      },
+      "response": []
+    },
+    {
+      "name": "Merchant API",
+      "description": "Authenticated with `X-Api-Key`, applied to this whole folder. A missing key is 401 `missing_api_key`; an unknown or deactivated one is 401 `invalid_api_key`.\n\nThe key is shown once, by `bun run seed` — only its SHA-256 hash is stored, so a lost key is replaced rather than recovered.",
+      "auth": {
+        "type": "apikey",
+        "apikey": [
+          { "key": "key", "value": "X-Api-Key", "type": "string" },
+          { "key": "value", "value": "{{apiKey}}", "type": "string" },
+          { "key": "in", "value": "header", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Create payment (Tron / USDT)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Capture the public id so every later request in this collection",
+                  "// follows the payment that was just created.",
+                  "if (pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    if (body.id) {",
+                  "        pm.collectionVariables.set('publicId', body.id);",
+                  "        console.log('publicId ->', body.id);",
+                  "        console.log('checkout ->', body.checkout_url);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount_cop\": 50000,\n  \"asset\": \"USDT\",\n  \"network\": \"tron-nile\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "payments"]
+            },
+            "description": "Freezes a COP->token quote (market rate + spread, valid 15 min) and derives a unique HD address for this payment on Tron's own coin type. Returns 201 with `checkout_url` — the link you hand a payer.\n\nTron detection is TronGrid polling, since Tron has no log subscription. The QR carries the bare Base58 address because Tron wallets agree on no payment-link standard, so `wallet_uri` is null and the payer sends the exact amount manually.\n\nThis request stores `publicId` from the response, so run it before anything below."
+          },
+          "response": []
+        },
+        {
+          "name": "Create payment (Sepolia / USDC, with metadata)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const body = pm.response.json();",
+                  "    if (body.id) { pm.collectionVariables.set('publicId', body.id); }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount_cop\": 50000,\n  \"asset\": \"USDC\",\n  \"network\": \"eth-sepolia\",\n  \"metadata\": {\n    \"order_id\": \"ORD-001\",\n    \"customer\": \"andrea\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "payments"]
+            },
+            "description": "Same call on an EVM network, carrying merchant metadata. `metadata` is opaque to the gateway — it is stored and echoed back, and the console's search matches inside it, so `order_id` is findable without a separate index.\n\nEVM detection is an Alchemy WebSocket filtered on the indexed `to` topic, plus a chunked `getLogs` backfill for whatever a reconnection missed. The QR is an EIP-681 URI, so a wallet opens pre-filled with token, recipient and amount.\n\nValid pairings come from the registry in `src/config.ts`:\n\n| network | asset |\n|---|---|\n| `tron-nile` | `USDT` |\n| `eth-sepolia` | `USDC` |\n| `base-sepolia` | `USDC` |\n\nAsking for `USDT` on an EVM network is 400 `cannot_create_payment` / \"Unsupported asset/network combination\".\n\nNote: `base-sepolia` is not currently enabled on the Alchemy app, so a payment there is created but never detected."
+          },
+          "response": []
+        },
+        {
+          "name": "Payment status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/payments/{{publicId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "payments", "{{publicId}}"]
+            },
+            "description": "Scoped to the calling merchant. Another merchant's payment returns 404 rather than 403, so the endpoint never confirms that an id exists.\n\nStates: `pending -> detecting -> partially_paid -> paid`, with branches `expired` (quote lapsed with no funds) and `underpaid_expired` (grace window lapsed while partial)."
+          },
+          "response": []
+        },
+        {
+          "name": "Merchant balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "me"]
+            },
+            "description": "Name and credited `balance_cop`, as a string. The balance moves only when a payment reaches `paid`, and every movement has a matching ledger entry (visible in the console's payment detail)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Public / checkout",
+      "description": "Unauthenticated — these are exactly what the checkout page calls. They expose the payment and nothing about the merchant.",
+      "item": [
+        {
+          "name": "Payment status (public)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/public/payments/{{publicId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["public", "payments", "{{publicId}}"]
+            },
+            "description": "The same view the merchant API returns, minus anything merchant-identifying. The SPA polls this every 10s and stops on a terminal status.\n\nReading Postgres costs nothing at the metered providers, so polling this is cheap — slowing it down saves database work, not money."
+          },
+          "response": []
+        },
+        {
+          "name": "Checkout payload (QR + URI)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/public/payments/{{publicId}}/checkout",
+              "host": ["{{baseUrl}}"],
+              "path": ["public", "payments", "{{publicId}}", "checkout"]
+            },
+            "description": "One shot: the public payment view plus everything needed to render a checkout — `payment_uri`, `qr_data_url`, token `decimals`, chain `family`, and the two TTLs as spans (the payment view carries deadlines; the UI draws each as a depleting bar, which needs the span it is depleting).\n\n`payment_uri` is an EIP-681 URI on EVM and the bare Base58 address on Tron. `wallet_uri` is null for Tron — no deep-link standard exists there.\n\n`qr_data_url` is a `data:image/png;base64,...` string. To view it:\n\n    http --body GET $GW/public/payments/<id>/checkout \\\n      | jq -r .qr_data_url | sed 's/^data:image\\/png;base64,//' \\\n      | base64 -d > /tmp/qr.png && open /tmp/qr.png"
+          },
+          "response": []
+        },
+        {
+          "name": "I paid - look now",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/public/payments/{{publicId}}/check",
+              "host": ["{{baseUrl}}"],
+              "path": ["public", "payments", "{{publicId}}", "check"]
+            },
+            "description": "Scans the chain for this one payment, rather than the gateway polling on everyone's behalf. This is what lets the background sweep run slowly.\n\nThe response always carries the current status; `checked` says whether this request actually reached the chain. It is false when the payment is terminal, when the network is EVM (the WebSocket already delivers transfers within seconds, so scanning would spend quota for nothing), or when another call for the same payment landed inside the 10s cooldown.\n\nBeing public and unauthenticated is why the cooldown exists — without it the endpoint would be a lever for burning metered provider calls, the exact opposite of its purpose."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Console (operator)",
+      "description": "Gated by `ADMIN_PASSWORD` over HTTP Basic, username `admin` (or `ADMIN_USER`). A production boot refuses to start without it.\n\nCross-merchant and read-only: every route is a SELECT, so nothing here can corrupt a payment no matter what it is asked to render. There is no per-merchant scoping — whoever gets in sees everything, including internals the merchant API deliberately hides.",
+      "auth": {
+        "type": "basic",
+        "basic": [
+          { "key": "username", "value": "{{adminUser}}", "type": "string" },
+          { "key": "password", "value": "{{adminPassword}}", "type": "string" }
+        ]
+      },
+      "item": [
+        {
+          "name": "Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "stats"]
+            },
+            "description": "Payment counts by status and by network, deposit tallies (total / unconfirmed), webhook queue depth (pending / delivered / dead), merchant count, and the live business parameters the service booted with.\n\n`webhooks.dead` is the one to watch: delivery stops permanently at 8 attempts and there is no retry path yet."
+          },
+          "response": []
+        },
+        {
+          "name": "Merchants",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/clients",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "clients"]
+            },
+            "description": "Every merchant with its balance and payment count. Balances are strings."
+          },
+          "response": []
+        },
+        {
+          "name": "Payments (filterable)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/payments?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "payments"],
+              "query": [
+                { "key": "limit", "value": "50", "description": "Default 50, capped at 200." },
+                { "key": "offset", "value": "0", "description": "Default 0. `total` is the unfiltered-by-page count, so it stays correct as you page.", "disabled": true },
+                { "key": "status", "value": "paid", "description": "One of pending, detecting, partially_paid, paid, expired, underpaid_expired. An unrecognised value is ignored, not a 400.", "disabled": true },
+                { "key": "network", "value": "tron-nile", "description": "Must exist in the registry, else ignored.", "disabled": true },
+                { "key": "asset", "value": "USDT", "description": "USDC or USDT.", "disabled": true },
+                { "key": "client_id", "value": "", "description": "UUID. A malformed one is ignored rather than erroring in Postgres.", "disabled": true },
+                { "key": "q", "value": "ORD-001", "description": "Substring across public id, receiving address, metadata, AND transaction hash - which is what you want when reconciling against a block explorer.", "disabled": true }
+              ]
+            },
+            "description": "Enable the disabled query params to filter. Filters combine with AND.\n\nThe search that matters is `q` reaching transaction hashes through the deposits table: paste a hash from Etherscan or Tronscan and it finds the payment it settled."
+          },
+          "response": []
+        },
+        {
+          "name": "Payment detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/payments/{{publicId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "payments", "{{publicId}}"]
+            },
+            "description": "Everything the merchant API hides: HD derivation index, the frozen COP-per-token rate, the required amount with dust tolerance, every deposit with its confirmation progress, webhook delivery attempts, and the ledger entries behind the balance.\n\nAn unknown id is 404."
+          },
+          "response": []
+        },
+        {
+          "name": "Deposits",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/deposits?limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "deposits"],
+              "query": [
+                { "key": "limit", "value": "100", "description": "Default 100, capped at 200." },
+                { "key": "confirmed", "value": "false", "description": "true or false. Anything else is ignored.", "disabled": true },
+                { "key": "network", "value": "tron-nile", "description": "Must exist in the registry.", "disabled": true },
+                { "key": "q", "value": "", "description": "Transaction hash or address substring.", "disabled": true }
+              ]
+            },
+            "description": "Flat feed of every detected transfer across all payments, newest first, each carrying its payment's public id and status.\n\nDeposits are idempotent by (network, txHash, logIndex), and late or terminal ones are still recorded for reconciliation even when they no longer affect settlement — so this feed is the ground truth for what the chain actually delivered, `confirmed=false` being what is still maturing."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

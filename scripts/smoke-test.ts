@@ -9,6 +9,7 @@
  * It does NOT touch CoinGecko or any chain — deposits are injected directly
  * via the same service functions the workers call.
  */
+import "./quiet"; // must precede every ../src import
 import { randomBytes } from "crypto";
 import { eq } from "drizzle-orm";
 import { db, schema, sql } from "../src/db";

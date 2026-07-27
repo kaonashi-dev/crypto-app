@@ -101,4 +101,9 @@ export const webhookJobs = pgTable("webhook_jobs", {
 export const hdCounter = pgTable("hd_counter", {
   id: integer("id").primaryKey().default(1),
   nextIndex: integer("next_index").notNull().default(0),
+  // BIP-32 master fingerprint of the mnemonic these indexes were issued from.
+  // Binds the counter to one tree so a swapped HD_MNEMONIC fails loudly instead
+  // of continuing the sequence into addresses the previous seed owns. Nullable
+  // for counters that predate it; adopted on the next boot (services/wallet.ts).
+  seedFingerprint: text("seed_fingerprint"),
 });

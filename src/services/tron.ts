@@ -1,6 +1,9 @@
 import { base58check } from "@scure/base";
 import { sha256 } from "@noble/hashes/sha256";
 import { env, type TronNetworkDef } from "../config";
+import { getLogger, count, observe } from "../observability";
+
+const log = getLogger("trongrid");
 
 const b58 = base58check(sha256);
 
@@ -62,21 +65,71 @@ function headers(): Record<string, string> {
   return h;
 }
 
-async function post<T>(net: TronNetworkDef, path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${net.apiBase}${path}`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify(body),
+/**
+ * One call to TronGrid, timed and counted.
+ *
+ * Tron detection is entirely polling, so the call count *is* the cost model and
+ * the per-call latency is the first thing to look at when a scan starts taking
+ * longer than its interval. HTTP 429 is called out by name because the free
+ * tier is rate-limited per IP and a silent 429 looks exactly like "the payer
+ * never sent anything".
+ */
+async function request<T>(
+  net: TronNetworkDef,
+  path: string,
+  init?: { method: "POST"; body: unknown }
+): Promise<T> {
+  const started = performance.now();
+  // Query strings carry addresses and timestamps, not secrets, but the path
+  // alone is the useful grouping key.
+  const route = path.split("?")[0]!;
+
+  let res: Response;
+  try {
+    res = await fetch(`${net.apiBase}${path}`, {
+      method: init ? "POST" : "GET",
+      headers: headers(),
+      ...(init ? { body: JSON.stringify(init.body) } : {}),
+    });
+  } catch (e) {
+    count("http.client.errors", { host: "trongrid", route });
+    log.warn("trongrid request failed", {
+      "http.request.method": init ? "POST" : "GET",
+      "http.route": route,
+      "server.address": new URL(net.apiBase).host,
+      duration_ms: Math.round(performance.now() - started),
+      err: e,
+    });
+    throw e;
+  }
+
+  const ms = performance.now() - started;
+  observe("http.client.duration", ms, { host: "trongrid", route });
+  count("http.client.requests", { host: "trongrid", route, status: res.status });
+  count("rpc.calls", { network: "tron", method: route });
+
+  log.trace("trongrid request", {
+    "http.request.method": init ? "POST" : "GET",
+    "http.route": route,
+    "url.path": path,
+    "http.response.status_code": res.status,
+    duration_ms: Math.round(ms),
   });
+
+  if (res.status === 429) {
+    log.warn("trongrid rate-limited", {
+      "http.route": route,
+      hint: "set TRONGRID_API_KEY or raise TRON_POLL_INTERVAL_SEC",
+    });
+  }
   if (!res.ok) throw new Error(`TronGrid ${path} -> HTTP ${res.status}`);
   return (await res.json()) as T;
 }
 
-async function get<T>(net: TronNetworkDef, path: string): Promise<T> {
-  const res = await fetch(`${net.apiBase}${path}`, { headers: headers() });
-  if (!res.ok) throw new Error(`TronGrid ${path} -> HTTP ${res.status}`);
-  return (await res.json()) as T;
-}
+const post = <T>(net: TronNetworkDef, path: string, body: unknown): Promise<T> =>
+  request<T>(net, path, { method: "POST", body });
+
+const get = <T>(net: TronNetworkDef, path: string): Promise<T> => request<T>(net, path);
 
 /** Latest block height. Doubles as the liveness probe for the supervisor. */
 export async function getNowBlock(net: TronNetworkDef): Promise<bigint> {

@@ -3,6 +3,7 @@
  * external network). Validates routing, api-key auth, QR/EIP-681 checkout
  * rendering and the public status endpoint.
  */
+import "./quiet"; // must precede every ../src import
 import { randomBytes } from "crypto";
 import { app } from "../src/api/routes";
 import { db, schema, sql } from "../src/db";

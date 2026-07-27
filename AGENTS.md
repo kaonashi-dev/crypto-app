@@ -8,7 +8,8 @@
 
 ## Setup And Commands
 
-- Copy `.env.example` to `.env`. Bun loads it automatically. Never read, print, or commit the real `.env`; it contains RPC keys and the testnet mnemonic.
+- Copy `.env.example` to `.env`. Bun loads it automatically. Never read, print, or commit the real `.env`; it contains RPC keys and the mnemonic.
+- `HD_MNEMONIC` comes from `bun run mnemonic:new --write`, which generates a tree and edits that one line without printing it. Never substitute a published test mnemonic (hardhat/anvil, ganache, the BIP-39 vector): `preflight()` warns on testnets and refuses to boot if any registered network is not a testnet. Rotating it is not a config tweak — `hd_counter.seed_fingerprint` binds the database to one tree, so a swap fails at boot and at the next `reserveDerivationIndex`.
 - Never use a real or production environment, database, credentials, RPC configuration, or funds unless the user explicitly requests it.
 - Local Postgres is PostgreSQL 16 on host port 5433: `bun run db:up`, then `bun run db:migrate`. `DATABASE_URL` is also required by Drizzle commands and every test script.
 - Deployment is a container: `Dockerfile` (builds the SPA, ships a production-only dependency tree) and `railway.json`. Migrations there run through `bun run db:deploy` (`scripts/migrate.ts`, drizzle-orm's migrator) because `drizzle-kit` is a devDependency. Keep the two paths equivalent — both read `drizzle/`.
@@ -23,6 +24,7 @@
 - Focused checks are standalone scripts: `bun run scripts/smoke-test.ts`, `bun run scripts/api-test.ts`, and `bun run scripts/admin-test.ts`. The API/admin scripts use Hono `app.request()`; no running server or chain access is needed.
 - Run `bun run build:web` before `api-test.ts` or `admin-test.ts`; both assert that the SPA shell/assets are served. `smoke-test.ts` does not need the web build.
 - These scripts use fixed rates and injected deposits, so they do not call CoinGecko, FX providers, Alchemy, or TronGrid. They do require a migrated PostgreSQL database.
+- Each script imports `./quiet` first, which drops the service log to `warn` so the `ok/FAIL` lines stay readable; it must stay the first import. Override it to watch the machinery work: `LOG_LEVEL=debug bun run scripts/smoke-test.ts`.
 - Tests append clients/payments/deposits and do not clean up. In addition, `smoke-test.ts` runs the global expiry routine and can expire unrelated stale rows. Use a disposable development database, not shared data.
 
 ## Architecture And Invariants
@@ -33,4 +35,5 @@
 - Preserve deposit idempotency by `(network, txHash, logIndex)`, row locks around state transitions, and the guard against crediting a paid payment twice. Late/terminal deposits are still recorded for reconciliation even when they no longer affect settlement.
 - One Vite bundle serves both surfaces; the TanStack route tree in `web/src/router.tsx` owns `/pay/$publicId` and `/admin/*`, and the backend returns the same shell for both. Checkout copy is intentionally Spanish and payer-facing; `web/src/admin/` is an English, dark operator console. The two palettes and the shared type system live in `web/src/index.css`; status marks (`web/src/lib/status.ts`) are the non-colour channel both surfaces use, so no status is ever carried by hue alone.
 - Frontend data access goes through TanStack Query, never a bare `useEffect` fetch. Polling cadence is a query option: the checkout's status query stops itself on a terminal status, and every console query takes its interval from `refreshInterval()` in `web/src/admin/console.ts` so the auto-refresh preference stays in one place. Console filters belong in the URL via `validateSearch`, not in component state.
+- Nothing in `src/` calls `console` directly. Get a scoped logger from `src/observability` (`getLogger("payments")`) and log facts as attributes, not as interpolated message text — that single rule is what gives level control, secret redaction, trace correlation, the `/admin/api/logs` tail and OTLP export. Records follow the OpenTelemetry log data model and its semantic conventions; `docs/LOGGING.md` is the reference, including the attribute namespaces and which level a line belongs at. Redaction happens at the sink, so a new call site cannot forget it — but do not defeat it by pasting a secret into a message body.
 - `/admin` is intentionally read-only and cross-merchant. `ADMIN_PASSWORD` gates the console and its data routes with HTTP Basic (wired in `src/api/routes.ts`); the boot preflight makes it mandatory in production and optional locally. That is one shared credential, not an identity — do not add mutations without per-operator authentication and an audit model.
