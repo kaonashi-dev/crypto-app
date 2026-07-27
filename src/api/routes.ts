@@ -1,6 +1,5 @@
 import { Hono, type Context } from "hono";
 import { serveStatic } from "hono/bun";
-import { basicAuth } from "hono/basic-auth";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import QRCode from "qrcode";
@@ -10,6 +9,7 @@ import { createPayment } from "../services/payments";
 import { publicPaymentView } from "../services/webhooks";
 import { apiKeyAuth } from "./auth";
 import { adminApi } from "./admin";
+import { adminAuthApi, adminSessionGuard } from "./admin-auth";
 import { scanTronPayment } from "../workers/tron-watcher";
 import {
   getLogger,
@@ -386,24 +386,20 @@ app.post("/public/payments/:publicId/check", async (c) => {
 
 // -- Internal backoffice console ---------------------------------------
 // The console is read-only but cross-merchant, and exposes operational internals
-// the merchant API hides. ADMIN_PASSWORD gates the whole surface — console shell
-// and data routes alike — and the boot preflight makes it mandatory in
-// production, so a deployed instance is never open. Left unset in local
+// the merchant API hides. Every byte of that comes from /admin/api, which the
+// session guard covers in full: an operator signs in against `admin_users` and
+// carries a session cookie (see ./admin-auth.ts). The boot preflight makes
+// ADMIN_PASSWORD mandatory in production — it is the bootstrap operator's
+// password — so a deployed instance is never open; left unset in local
 // development the console stays open, as it always was.
 //
-// Registered before the routes below, because Hono runs middleware in
-// registration order and would skip anything added after a matching handler. The
-// browser prompts once on /admin and then carries the credentials to /admin/api
-// on its own, so the SPA's queries need no change.
-if (env.adminPassword) {
-  const guard = basicAuth({
-    username: env.adminUser,
-    password: env.adminPassword,
-    realm: "gateway console",
-  });
-  app.use("/admin", guard);
-  app.use("/admin/*", guard);
-}
+// The guard is registered before both route groups because Hono runs matching
+// handlers in registration order: putting it first means no console route can be
+// added later that quietly sits outside it. The login endpoint is exempted
+// inside the guard itself rather than by ordering, so the exemption is one
+// readable line instead of an emergent property of this file's layout.
+app.use("/admin/api/*", adminSessionGuard);
+app.route("/admin/api/auth", adminAuthApi);
 
 // Registered before the /admin/* shell route so the data routes win the match.
 app.route("/admin/api", adminApi);

@@ -42,12 +42,17 @@ export const env = {
   // behind a proxy that sets X-Forwarded-Proto. Set it when the gateway sits on
   // a custom domain and the links must not vary with the Host header.
   publicBaseUrl: Bun.env.PUBLIC_BASE_URL?.replace(/\/+$/, "") || null,
-  // Gates the /admin console (see src/api/admin.ts) with HTTP Basic. Optional in
+  // The bootstrap console operator (see src/services/admin-auth.ts). The account
+  // is created on boot and its password kept in step with this variable, so the
+  // environment stays the way you recover access to a deployment. Optional in
   // development, required in production — the preflight refuses to boot without
-  // it. The username is only the other half of the Basic credential; the password
-  // is the secret.
-  adminUser: Bun.env.ADMIN_USER || "admin",
+  // it, and without it the console has no account to sign in to at all.
+  adminUser: (Bun.env.ADMIN_USER || "samuel").trim().toLowerCase(),
   adminPassword: Bun.env.ADMIN_PASSWORD || null,
+  // How long a console sign-in lasts. Short by default: the session is a
+  // cross-merchant view of every payment, and an unattended browser should stop
+  // being one by the end of the working day.
+  adminSessionTtlHours: Number(Bun.env.ADMIN_SESSION_TTL_HOURS ?? 12),
 };
 
 /**
@@ -84,7 +89,9 @@ export function preflight(): void {
     !Bun.env.HD_MNEMONIC && "HD_MNEMONIC",
     // /admin is read-only but cross-merchant, and surfaces internals the
     // merchant API deliberately hides. A deployed instance is internet-facing,
-    // so it may not serve that console unauthenticated.
+    // so it may not serve that console unauthenticated — and this is also the
+    // password of the operator account the boot creates, so without it there is
+    // nobody to sign in as.
     env.isProduction && !env.adminPassword && "ADMIN_PASSWORD",
   ].filter((v): v is string => typeof v === "string");
 
@@ -131,7 +138,9 @@ export function preflight(): void {
   }
 
   if (!env.isProduction && !env.adminPassword) {
-    log.warn("/admin is unauthenticated", { hint: "set ADMIN_PASSWORD to gate it" });
+    log.warn("/admin is unauthenticated — no operator account exists and the console signs nobody in", {
+      hint: `set ADMIN_PASSWORD to create the "${env.adminUser}" operator and require sign-in`,
+    });
   }
 
   for (const network of NETWORK_IDS) {
@@ -169,6 +178,8 @@ export function configSummary() {
     "config.fallback_usd_cop": env.fallbackUsdCop,
     "config.public_base_url": env.publicBaseUrl,
     "config.admin_authenticated": Boolean(env.adminPassword),
+    "config.admin_user": env.adminUser,
+    "config.admin_session_ttl_h": env.adminSessionTtlHours,
     "config.trongrid_key": Boolean(env.trongridApiKey),
     "config.networks_enabled": NETWORK_IDS.filter((n) => !missingCredential(n)),
     "config.networks_mainnet": NETWORK_IDS.filter((n) => !NETWORKS[n].testnet),

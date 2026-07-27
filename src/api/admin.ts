@@ -7,10 +7,11 @@
  * ledger entries).
  *
  * Access is therefore all-or-nothing, and gated one level up in ./routes.ts by
- * `ADMIN_PASSWORD` (HTTP Basic over both this API and the console shell).
- * Production boots refuse to start without it; local development may leave it
- * unset and run open. There is no per-merchant scoping here — an operator who
- * reaches these routes sees everything.
+ * the session guard in ./admin-auth.ts: a named operator from `admin_users`
+ * signs in and carries a session cookie. Production boots refuse to start
+ * without `ADMIN_PASSWORD` (the bootstrap operator's password); local
+ * development may leave it unset and run open. There is no per-merchant scoping
+ * here — an operator who reaches these routes sees everything.
  *
  * Every route is a SELECT. Nothing here mutates the payment state machine, so
  * the console can never corrupt a payment no matter what it is asked to render.
@@ -21,6 +22,7 @@ import { db, schema } from "../db";
 import { NETWORKS, env, tokenFor, configSummary, missingCredential, type NetworkId } from "../config";
 import { requiredWithTolerance } from "../services/payments";
 import { rateCacheState } from "../services/rates";
+import { activeSessionCounts } from "../services/admin-auth";
 import {
   recentLogs,
   loggingConfig,
@@ -378,6 +380,48 @@ adminApi.get("/payments/:publicId", async (c) => {
       amount_cop: s(l.amountCop),
       type: l.type,
       created_at: l.createdAt,
+    })),
+  });
+});
+
+// -- GET /admin/api/users ----------------------------------------------
+// Who can open this console. Read-only like everything else here: accounts are
+// created by the boot from ADMIN_PASSWORD, not through the console, so there is
+// no mutation to authorise and no audit model to owe.
+//
+// Password hashes are not selected — not masked in the response, not selected —
+// so no future change to this handler can start returning them.
+adminApi.get("/users", async (c) => {
+  const [rows, sessions] = await Promise.all([
+    db
+      .select({
+        id: schema.adminUsers.id,
+        username: schema.adminUsers.username,
+        isActive: schema.adminUsers.isActive,
+        lastLoginAt: schema.adminUsers.lastLoginAt,
+        createdAt: schema.adminUsers.createdAt,
+      })
+      .from(schema.adminUsers)
+      .orderBy(desc(schema.adminUsers.createdAt)),
+    activeSessionCounts(),
+  ]);
+
+  const me = c.get("operator");
+
+  return c.json({
+    // Null when the console is running open (no ADMIN_PASSWORD): the Users view
+    // uses this to explain why nobody is marked as signed in.
+    signed_in_as: me?.id ?? null,
+    bootstrap_username: env.adminUser,
+    session_ttl_hours: env.adminSessionTtlHours,
+    users: rows.map((u) => ({
+      id: u.id,
+      username: u.username,
+      is_active: u.isActive,
+      last_login_at: u.lastLoginAt,
+      created_at: u.createdAt,
+      active_sessions: sessions.get(u.id) ?? 0,
+      is_you: me?.id === u.id,
     })),
   });
 });

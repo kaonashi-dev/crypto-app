@@ -1,6 +1,6 @@
-import { createEffect, onCleanup, type JSX } from "solid-js";
+import { createEffect, onCleanup, Show, type JSX } from "solid-js";
 import { Link, Outlet, useRouterState } from "@tanstack/solid-router";
-import { useIsFetching, useQueryClient } from "@tanstack/solid-query";
+import { useIsFetching, useQuery, useQueryClient } from "@tanstack/solid-query";
 import {
   CLOCK_IDLE_MS,
   CLOCK_LIVE_MS,
@@ -11,6 +11,8 @@ import {
   setLoadedAt,
   setNow,
 } from "./console";
+import { fetchSession, logout, sessionExpired, setSessionExpired } from "./auth";
+import { LoginScreen } from "./LoginScreen";
 
 function NavLink(props: { to: string; active: boolean; children: JSX.Element }) {
   return (
@@ -33,7 +35,43 @@ export function AdminLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const fetching = useIsFetching();
 
-  const onPayments = () => !pathname().startsWith("/admin/deposits");
+  const onDeposits = () => pathname().startsWith("/admin/deposits");
+  const onUsers = () => pathname().startsWith("/admin/users");
+  const onPayments = () => !onDeposits() && !onUsers();
+
+  /**
+   * Who is signed in — and therefore whether any of the console renders at all.
+   *
+   * `retry: false` because a 401 is an answer, not a failure to retry: the
+   * fetcher resolves it to a signed-out session and the login screen replaces
+   * the console below.
+   */
+  const session = useQuery(() => ({
+    queryKey: ["session"],
+    queryFn: fetchSession,
+    retry: false,
+    staleTime: 60_000,
+  }));
+
+  // Locked either because the identity query says so, or because some other
+  // request came back 401 mid-session — an expiry should stop the tables on
+  // screen now, not at the next poll of /auth/me.
+  const locked = () => sessionExpired() || session.data?.authenticated === false;
+  const operator = () => session.data?.user ?? null;
+  const openMode = () => session.data?.mode === "open";
+
+  /** Signing in resumes the view you were already on — nothing navigates. */
+  const onSignedIn = () => {
+    setSessionExpired(false);
+    queryClient.invalidateQueries();
+  };
+
+  const signOut = async () => {
+    await logout();
+    // The cache holds cross-merchant data; a signed-out browser should not still
+    // be carrying it.
+    queryClient.clear();
+  };
 
   // The relative timestamps in every table need a clock of their own. It ticks
   // slowly while auto-refresh is off: precise seconds against a snapshot would
@@ -67,6 +105,12 @@ export function AdminLayout() {
   onCleanup(unsubscribe);
 
   return (
+    // Three states, in order of what the operator is owed: nothing until we know
+    // whether they are signed in (a console that flashes merchant data and then
+    // asks for a password has already shown it), the login screen if they are
+    // not, the console if they are.
+    <Show when={!session.isPending} fallback={<div class="min-h-screen bg-plane" />}>
+    <Show when={!locked()} fallback={<LoginScreen onSignedIn={onSignedIn} />}>
     <div class="min-h-screen bg-plane font-sans text-ink antialiased">
       <header class="sticky top-0 z-20 border-b border-hairline bg-plane/95 backdrop-blur">
         <div class="mx-auto flex max-w-[1500px] flex-wrap items-end justify-between gap-4 px-4 pt-4 sm:px-6">
@@ -84,8 +128,11 @@ export function AdminLayout() {
               <NavLink to="/admin" active={onPayments()}>
                 Payments
               </NavLink>
-              <NavLink to="/admin/deposits" active={!onPayments()}>
+              <NavLink to="/admin/deposits" active={onDeposits()}>
                 Deposits
+              </NavLink>
+              <NavLink to="/admin/users" active={onUsers()}>
+                Operators
               </NavLink>
             </nav>
           </div>
@@ -135,6 +182,38 @@ export function AdminLayout() {
                 {live() ? "Live" : "Auto-refresh off"}
               </span>
             </button>
+
+            {/* Who is looking. In open mode there is no answer, and saying so is
+                the point: an unauthenticated console should not be mistakable
+                for a secured one. */}
+            <Show
+              when={operator()}
+              fallback={
+                <Show when={openMode()}>
+                  <span
+                    class="rounded border border-warn/50 px-2 py-1 text-[0.7rem] text-warn"
+                    title="No ADMIN_PASSWORD is set on this server — the console is open to anyone who can reach the port"
+                  >
+                    unauthenticated
+                  </span>
+                </Show>
+              }
+            >
+              {(who) => (
+                <span class="flex items-center gap-2 border-l border-hairline pl-3">
+                  <span class="font-mono text-[0.72rem] text-ink-2" title="Signed in operator">
+                    {who().username}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={signOut}
+                    class="cursor-pointer rounded border border-hairline px-2.5 py-1 text-[0.75rem] text-ink-3 transition-colors hover:border-baseline hover:text-ink focus-visible:ring-2 focus-visible:ring-ink-2 focus-visible:outline-none"
+                  >
+                    Sign out
+                  </button>
+                </span>
+              )}
+            </Show>
           </div>
         </div>
       </header>
@@ -144,9 +223,27 @@ export function AdminLayout() {
       </main>
 
       <footer class="mx-auto max-w-[1500px] px-4 pb-8 text-[0.7rem] leading-relaxed text-ink-3 sm:px-6">
-        Read-only internal console — no authentication. Do not expose this port outside your
-        machine.
+        <Show
+          when={operator()}
+          fallback={
+            <>
+              Read-only internal console — <span class="text-warn">no authentication</span>. Set
+              ADMIN_PASSWORD to require a sign-in; until then, do not expose this port outside
+              your machine.
+            </>
+          }
+        >
+          {(who) => (
+            <>
+              Read-only internal console, signed in as{" "}
+              <span class="font-mono text-ink-2">{who().username}</span>. Cross-merchant: every
+              payment here belongs to someone.
+            </>
+          )}
+        </Show>
       </footer>
     </div>
+    </Show>
+    </Show>
   );
 }

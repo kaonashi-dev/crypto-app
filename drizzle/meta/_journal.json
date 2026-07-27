@@ -15,6 +15,13 @@
       "when": 1785126551280,
       "tag": "0001_loud_slayback",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785135549267,
+      "tag": "0002_odd_mathemanic",
+      "breakpoints": true
     }
   ]
 }

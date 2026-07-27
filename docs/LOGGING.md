@@ -113,7 +113,7 @@ Query parameters are logged; SQL statement **parameters** are not.
 
 ## Operator endpoints
 
-Both sit behind `ADMIN_PASSWORD` with the rest of the console.
+Both sit behind the console's operator sign-in with the rest of `/admin/api`.
 
 `GET /admin/api/logs` — the process's own log tail from an in-memory ring
 (`LOG_BUFFER`, default 500). Testing a payment means following it across an HTTP
