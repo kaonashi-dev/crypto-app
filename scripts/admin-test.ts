@@ -13,6 +13,7 @@ import { db, schema, sql } from "../src/db";
 import { env } from "../src/config";
 import { copToRaw } from "../src/services/rates";
 import { deriveAddress, reserveDerivationIndex } from "../src/services/wallet";
+import { bootstrapOperator } from "../src/services/admin-auth";
 
 let failures = 0;
 function assert(cond: boolean, msg: string) {
@@ -22,15 +23,32 @@ function assert(cond: boolean, msg: string) {
 
 const RATE = 4_000_000_000n; // 4,000 COP per USDC
 
-// The console is gated by ADMIN_PASSWORD when it is set (always in production,
-// optionally in development). Carry the credential so this test exercises the
-// same routes either way.
-const adminHeaders: Record<string, string> = env.adminPassword
-  ? {
-      Authorization:
-        "Basic " + Buffer.from(`${env.adminUser}:${env.adminPassword}`).toString("base64"),
-    }
-  : {};
+// The console is gated by an operator session when ADMIN_PASSWORD is set (always
+// in production, optionally in development). Sign in once and carry the cookie,
+// so this test exercises the same routes either way.
+//
+// Mutated in place by signIn() below — every request reads it at call time.
+const adminHeaders: Record<string, string> = {};
+
+/** The cookie a signed-in browser would hold, or nothing when the console runs open. */
+async function signIn(): Promise<void> {
+  if (!env.adminPassword) return;
+
+  // Normally done at boot by src/index.ts; this test drives `app` directly.
+  await bootstrapOperator();
+
+  const res = await app.request("/admin/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: env.adminUser, password: env.adminPassword }),
+  });
+  const cookie = res.headers.get("set-cookie");
+  if (res.status !== 200 || !cookie) {
+    console.error(`[admin-test] could not sign in as "${env.adminUser}" (${res.status})`);
+    process.exit(1);
+  }
+  adminHeaders.Cookie = cookie.split(";")[0]!;
+}
 
 const get = (path: string) => app.request(path, { headers: adminHeaders });
 const json = async (path: string) => {
@@ -39,6 +57,8 @@ const json = async (path: string) => {
 };
 
 async function main() {
+  await signIn();
+
   const [client] = await db
     .insert(schema.clients)
     .values({
@@ -159,13 +179,51 @@ async function main() {
   assert(res.status === 200, "/admin/deposits -> 200 (client-routed)");
 
   // The gate is the deployment's only protection for a cross-merchant surface,
-  // so assert it actually refuses when configured.
+  // so assert it actually refuses when configured. The shell itself is public by
+  // design — it is static markup, and the login screen has to be servable.
   if (env.adminPassword) {
-    console.log("\n[ADMIN_PASSWORD gate]");
-    assert((await app.request("/admin")).status === 401, "/admin without credentials -> 401");
+    console.log("\n[session gate]");
     assert(
       (await app.request("/admin/api/stats")).status === 401,
-      "/admin/api/stats without credentials -> 401"
+      "data route without a session -> 401"
+    );
+    assert(
+      (await app.request("/admin/api/auth/me")).status === 401,
+      "identity probe without a session -> 401"
+    );
+    assert(
+      (await app.request("/admin")).status === 200,
+      "console shell stays public so the login screen can render"
+    );
+
+    const bad = await app.request("/admin/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: env.adminUser, password: "not-the-password" }),
+    });
+    assert(bad.status === 401, "wrong password -> 401");
+    assert(
+      ((await bad.json()) as any).error === "invalid_credentials" &&
+        !bad.headers.get("set-cookie"),
+      "rejection names neither half of the credential, and issues no cookie"
+    );
+
+    const unknown = await app.request("/admin/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: `nobody-${randomBytes(4).toString("hex")}`, password: "x" }),
+    });
+    assert(
+      unknown.status === 401 && ((await unknown.json()) as any).error === "invalid_credentials",
+      "unknown operator is indistinguishable from a wrong password"
+    );
+
+    const me = await json("/admin/api/auth/me");
+    assert(me.status === 200 && me.body.mode === "session", "signed-in identity probe -> session");
+    assert(me.body.user?.username === env.adminUser, "the session names the bootstrap operator");
+    assert(
+      !JSON.stringify(me.body).includes("password"),
+      "no password material in the identity payload"
     );
   }
 
@@ -273,6 +331,23 @@ async function main() {
   r = await json(`/admin/api/deposits?confirmed=true&q=${pendingTx}`);
   assert(r.body.deposits.length === 0, "confirmed=true excludes it");
 
+  console.log("\n[GET /admin/api/users]");
+  r = await json("/admin/api/users");
+  assert(r.status === 200, "users -> 200");
+  assert(
+    !/password/i.test(JSON.stringify(r.body)),
+    "no password material in the operator list — hashes are never selected"
+  );
+  if (env.adminPassword) {
+    const me = r.body.users.find((u: any) => u.username === env.adminUser);
+    assert(!!me, "the bootstrap operator is listed");
+    assert(me.is_you === true && r.body.signed_in_as === me.id, "the caller is marked as themselves");
+    assert(me.active_sessions >= 1, "the session this test signed in with is counted");
+    assert(me.is_active === true, "the bootstrap operator is active");
+  } else {
+    assert(r.body.signed_in_as === null, "open console reports nobody signed in");
+  }
+
   console.log("\n[GET /admin/api/diagnostics]");
   r = await json("/admin/api/diagnostics");
   assert(r.status === 200, "diagnostics -> 200");
@@ -333,6 +408,21 @@ async function main() {
   assert(raw.includes(`"amount_cop"`), "detail payload actually returned");
   assert(!/"amount_cop":\s*\d/.test(raw), "amount_cop is quoted, never a bare number");
   assert(!/"amount_raw":\s*\d/.test(raw), "amount_raw is quoted, never a bare number");
+
+  // Last, because it spends the session every check above needed: a logout has
+  // to end the session server-side, not just clear the browser's cookie.
+  if (env.adminPassword) {
+    console.log("\n[logout revokes the session]");
+    const out = await app.request("/admin/api/auth/logout", {
+      method: "POST",
+      headers: adminHeaders,
+    });
+    assert(out.status === 200, "logout -> 200");
+    assert(
+      (await get("/admin/api/stats")).status === 401,
+      "the same cookie no longer opens a data route"
+    );
+  }
 
   console.log(`\n${failures === 0 ? "ALL PASSED" : failures + " CHECK(S) FAILED"}`);
   await sql.end();

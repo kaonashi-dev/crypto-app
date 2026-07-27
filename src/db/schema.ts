@@ -97,6 +97,47 @@ export const webhookJobs = pgTable("webhook_jobs", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (t) => [index("webhook_jobs_pending_idx").on(t.deliveredAt, t.nextAttemptAt)]);
 
+// -- Console operators -------------------------------------------------
+// Who may open /admin. Separate from `clients`: a merchant is an API caller with
+// a key, an operator is a person with a password, and the console is
+// cross-merchant — conflating the two would make every merchant an operator.
+export const adminUsers = pgTable("admin_users", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  // Stored lower-cased and compared as stored, so "Samuel" and "samuel" are one
+  // account rather than two the unique index would happily keep apart.
+  username: text("username").notNull(),
+  // Argon2id PHC string (see services/admin-auth.ts). Never a plaintext password
+  // and never a bare digest: an unsalted hash of an operator password is a
+  // lookup away from the password itself.
+  passwordHash: text("password_hash").notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  lastLoginAt: timestamp("last_login_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [uniqueIndex("admin_users_username_idx").on(t.username)]);
+
+// -- Console sessions --------------------------------------------------
+// Server-side sessions rather than a signed stateless token: the point of
+// replacing the shared Basic credential is being able to say who is in and to
+// cut them off, and only a row you can delete does the second part. The cookie
+// carries an opaque random token; what is stored is its SHA-256, so a leaked
+// database dump cannot be replayed as a login.
+export const adminSessions = pgTable("admin_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => adminUsers.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  lastSeenAt: timestamp("last_seen_at").notNull().defaultNow(),
+  // Enough to recognise your own session in the list, and to notice one you do
+  // not recognise. Not a substitute for an access log.
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("admin_sessions_token_hash_idx").on(t.tokenHash),
+  index("admin_sessions_user_idx").on(t.userId),
+  index("admin_sessions_expires_idx").on(t.expiresAt),
+]);
+
 // -- Global HD derivation counter -------------------------------------
 export const hdCounter = pgTable("hd_counter", {
   id: integer("id").primaryKey().default(1),

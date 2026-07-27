@@ -3,6 +3,7 @@ import { superviseNetwork } from "./workers/supervisor";
 import { startExpirer } from "./workers/expirer";
 import { env, preflight, missingCredential, NETWORK_IDS } from "./config";
 import { assertSeedIdentity, SeedMismatchError } from "./services/wallet";
+import { bootstrapOperator } from "./services/admin-auth";
 import { sql } from "./db";
 import {
   getLogger,
@@ -66,6 +67,23 @@ try {
     process.exit(1);
   }
   log.error("seed identity check deferred — database unavailable at boot", { err: e });
+}
+
+// The console's bootstrap operator, kept in step with ADMIN_PASSWORD on every
+// boot (see services/admin-auth.ts). Deferred like the seed check because it
+// needs the database: a database that is merely unreachable must not stop the
+// gateway from serving payments, and the login path re-reads the row anyway, so
+// nothing can slip through while this is postponed.
+try {
+  const operator = await bootstrapOperator();
+  if (operator) {
+    log.info("console operator ready", {
+      "operator.id": operator.id,
+      "operator.username": operator.username,
+    });
+  }
+} catch (e) {
+  log.error("console operator bootstrap deferred — database unavailable at boot", { err: e });
 }
 
 for (const network of NETWORK_IDS) {

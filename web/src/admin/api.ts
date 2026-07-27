@@ -1,4 +1,5 @@
 import type { PaymentStatus } from "../lib/status";
+import { setSessionExpired } from "./auth";
 
 // -- Wire types (mirror src/api/admin.ts responses) ---------------------
 
@@ -117,6 +118,24 @@ export type PaymentDetail = {
   ledger: LedgerRow[];
 };
 
+export type UserRow = {
+  id: string;
+  username: string;
+  is_active: boolean;
+  last_login_at: string | null;
+  created_at: string;
+  active_sessions: number;
+  is_you: boolean;
+};
+
+export type UsersResponse = {
+  /** Null when the console is running open — nobody is signed in as anyone. */
+  signed_in_as: string | null;
+  bootstrap_username: string;
+  session_ttl_hours: number;
+  users: UserRow[];
+};
+
 export type PaymentFilters = {
   status?: string;
   network?: string;
@@ -126,9 +145,23 @@ export type PaymentFilters = {
 
 // -- Fetchers ----------------------------------------------------------
 
+/**
+ * A lapsed session, raised once for the whole console.
+ *
+ * Every console request funnels through here, so the session guard's 401 is
+ * turned into the signal AdminLayout watches in exactly one place — no route has
+ * to think about expiry, and none can forget to.
+ */
+function noteUnauthorized(res: Response) {
+  if (res.status === 401) setSessionExpired(true);
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`/admin/api${path}`);
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+  if (!res.ok) {
+    noteUnauthorized(res);
+    throw new Error(`${path} -> ${res.status}`);
+  }
   return (await res.json()) as T;
 }
 
@@ -147,9 +180,14 @@ export function fetchPayments(filters: PaymentFilters, limit = 50, offset = 0) {
 export async function fetchPaymentDetail(publicId: string): Promise<PaymentDetail | null> {
   const res = await fetch(`/admin/api/payments/${publicId}`);
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`payment ${res.status}`);
+  if (!res.ok) {
+    noteUnauthorized(res);
+    throw new Error(`payment ${res.status}`);
+  }
   return (await res.json()) as PaymentDetail;
 }
+
+export const fetchUsers = () => get<UsersResponse>("/users");
 
 export function fetchDeposits(filters: { network?: string; confirmed?: string; q?: string }) {
   const qs = new URLSearchParams({ limit: "100" });

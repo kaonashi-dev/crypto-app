@@ -4,6 +4,7 @@ import { AdminLayout } from "./admin/AdminLayout";
 import { PaymentsRoute } from "./admin/PaymentsRoute";
 import { DepositsRoute } from "./admin/DepositsRoute";
 import { PaymentDetailRoute } from "./admin/PaymentDetailRoute";
+import { UsersRoute } from "./admin/UsersRoute";
 import { NotFoundPage } from "./checkout/NotFoundPage";
 
 /**
@@ -85,9 +86,18 @@ const paymentDetailRoute = createRoute({
   component: PaymentDetailRoute,
 });
 
+// Operator accounts. A child of the admin route like every other view, so it
+// renders inside the same shell — and behind the same sign-in, since AdminLayout
+// is what decides whether any child renders at all.
+const usersRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "users",
+  component: UsersRoute,
+});
+
 const routeTree = rootRoute.addChildren([
   checkoutRoute,
-  adminRoute.addChildren([paymentsRoute, depositsRoute, paymentDetailRoute]),
+  adminRoute.addChildren([paymentsRoute, depositsRoute, paymentDetailRoute, usersRoute]),
 ]);
 
 export const router = createRouter({

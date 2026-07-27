@@ -119,12 +119,16 @@ gateway; you only need TRX in the receiving account when you later sweep funds o
 | `GET` | `/public/payments/:publicId/checkout` | — | One-shot checkout payload: public view + QR + `payment_uri` + `wallet_uri` + `decimals` + `family` + `quote_ttl_sec`/`grace_ttl_sec` |
 | `GET` | `/pay/:publicId` | — | Checkout page (SPA shell) |
 | `GET` | `/health` | — | Liveness |
-| `GET` | `/admin`, `/admin/deposits`, `/admin/p/:publicId` | Basic | Backoffice console (SPA shell) |
-| `GET` | `/admin/api/stats` | Basic | Status counts, queue health, live business parameters |
-| `GET` | `/admin/api/payments` | Basic | Payment list — `status`, `network`, `asset`, `client_id`, `q`, `limit`, `offset` |
-| `GET` | `/admin/api/payments/:publicId` | Basic | One payment plus its deposits, webhook attempts and ledger entries |
-| `GET` | `/admin/api/deposits` | Basic | Flat deposit feed — `network`, `confirmed`, `q` |
-| `GET` | `/admin/api/clients` | Basic | Merchants with balances and payment counts |
+| `GET` | `/admin`, `/admin/deposits`, `/admin/users`, `/admin/p/:publicId` | — | Backoffice console (SPA shell; renders the login screen until you sign in) |
+| `POST` | `/admin/api/auth/login` | — | Signs an operator in and sets the session cookie |
+| `POST` | `/admin/api/auth/logout` | Session | Ends the session server-side |
+| `GET` | `/admin/api/auth/me` | Session | Who is signed in (401 = show the login screen) |
+| `GET` | `/admin/api/stats` | Session | Status counts, queue health, live business parameters |
+| `GET` | `/admin/api/payments` | Session | Payment list — `status`, `network`, `asset`, `client_id`, `q`, `limit`, `offset` |
+| `GET` | `/admin/api/payments/:publicId` | Session | One payment plus its deposits, webhook attempts and ledger entries |
+| `GET` | `/admin/api/deposits` | Session | Flat deposit feed — `network`, `confirmed`, `q` |
+| `GET` | `/admin/api/clients` | Session | Merchants with balances and payment counts |
+| `GET` | `/admin/api/users` | Session | Console operators, last sign-in and open session counts |
 
 Amounts are always in the **smallest unit** (`bigint`, serialized as a string): COP
 without decimals, crypto in raw token units (USDC and USDT = 6 decimals). Never floats
@@ -142,13 +146,38 @@ the SPA is built.
 
 > **Cross-merchant, and gated as one thing.** It exposes every merchant's payments plus
 > internals the merchant API deliberately hides (HD derivation index, frozen rate, webhook
-> delivery attempts, ledger entries). Setting `ADMIN_PASSWORD` puts the console and its
-> data routes behind HTTP Basic; a production boot refuses to start without it, and local
-> development may leave it unset and run open. There is no per-merchant scoping — whoever
-> gets in sees everything. Every route is a `SELECT`, so nothing in the console can mutate
-> a payment.
+> delivery attempts, ledger entries). Signing in gets you all of it: there is no
+> per-merchant scoping, so whoever gets in sees everything. Every route is a `SELECT`, so
+> nothing in the console can mutate a payment.
 
-Three views:
+### Signing in
+
+The console asks for an operator username and password, and keeps you signed in with a
+session cookie. Accounts live in `admin_users`; sessions live in `admin_sessions`, one row
+per signed-in browser.
+
+| | |
+|---|---|
+| **Account** | `ADMIN_USER` (default `samuel`) with the password in `ADMIN_PASSWORD` |
+| **Created** | on every boot, by `bootstrapOperator()` — idempotent |
+| **Password reset** | change `ADMIN_PASSWORD` and restart; that operator's open sessions are revoked |
+| **Session length** | `ADMIN_SESSION_TTL_HOURS` (default 12), sliding while the session is in use |
+| **No `ADMIN_PASSWORD`** | no account exists and the console runs **open** — development only; a production boot refuses to start |
+
+Two properties worth stating, since both are the reason for a table rather than a
+credential in the environment: passwords are stored as **argon2id** hashes, never a bare
+digest — SHA-256 is right for a random API key and wrong for a password — and the cookie
+carries a random token whose **SHA-256 is what the session row holds**, so a database dump
+cannot be replayed as a signed-in browser. Signing out deletes the row; deactivating an
+operator (`is_active = false`, by SQL for now) ends their sessions on the next request.
+
+Failed sign-ins are throttled per (address, username) and per address, and every attempt is
+logged with the reason separated — unknown operator, wrong password, deactivated — while
+the response says only "invalid username or password". The console *shell* is public: it is
+static markup with no data in it, and the login screen has to be servable. Everything under
+`/admin/api` requires the session.
+
+Four views:
 
 - **Payments** — status mix across all payments as one bar (click a segment or legend entry
   to filter), plus a filterable, paginated table. Search spans public id, receiving
@@ -164,6 +193,10 @@ Three views:
   the watcher see my transfer at all?": a deposit can be recorded with no effect on its
   payment (it landed after the grace window, or in a terminal state), which the payments
   list alone would not reveal.
+- **Operators** (`/admin/users`) — who can open this console, when each last signed in, and
+  how many sessions each has open. Read-only like the rest: accounts come from the boot, not
+  from the browser, because granting access is a mutation and mutations here wait for the
+  audit model listed under *Pending for production*.
 
 **Auto-refresh is off by default.** Opening the console fetches once — three requests
 (`stats`, `payments`, `clients`) — and then nothing until you press **Refresh** or switch
@@ -325,7 +358,7 @@ configuration to maintain.
 |---|---|
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` — a reference, so it tracks the database service |
 | `HD_MNEMONIC` | its own mnemonic from `bun run mnemonic:new`, quoted — not the one your local `.env` uses, and not a published test phrase |
-| `ADMIN_PASSWORD` | a generated password; the boot refuses to start in production without it |
+| `ADMIN_PASSWORD` | a generated password for the console operator (`ADMIN_USER`, default `samuel`); the boot refuses to start in production without it, and changing it resets that operator's password on the next deploy |
 | `ALCHEMY_SEPOLIA_KEY` | your Alchemy key, if you want that network detected |
 | `ALCHEMY_BASE_SEPOLIA_KEY` | likewise, for Base Sepolia |
 | `PUBLIC_BASE_URL` | optional; pin `checkout_url`s to a custom domain, no trailing slash |
@@ -383,7 +416,9 @@ bills for wall-clock time.
   credential in it can only ever fail.
 - The boot preflight (`preflight()` in `src/config.ts`) exits on a missing `DATABASE_URL`,
   `HD_MNEMONIC`, or — in production — `ADMIN_PASSWORD`, rather than letting the gap surface
-  later inside a request or a worker tick. `SIGTERM` drains the Postgres pool before exit.
+  later inside a request or a worker tick. In production the last of those is also what the
+  console signs operators in with, so a deployment can never boot with a console nobody can
+  reach *and* nobody can be kept out of. `SIGTERM` drains the Postgres pool before exit.
 - The same preflight exits on an `HD_MNEMONIC` that fails its BIP-39 checksum, and on one
   of the published test mnemonics whenever any registered network is not a testnet — that
   pairing means every address the gateway hands a payer has a private key in a README
@@ -472,11 +507,12 @@ third-party funds.
 On the backoffice specifically, the console at `/admin` covers **inspection** only. Still
 pending:
 
-- **Scoping, and a real operator identity.** `ADMIN_PASSWORD` is one shared credential over
-  a cross-merchant view: it keeps the console off the open internet, but it cannot say
-  *who* looked, and there is no API-key-scoped merchant view (the merchant dashboard is a
-  filter over the same data). Per-operator accounts and an access log come with the audit
-  model below.
+- **Scoping, and an access log.** Operators are now named accounts with their own sessions,
+  so the console can say who signed in and when — but sign-ins are the only thing recorded,
+  and a *read* of a cross-merchant view leaves no trace. There is also still no
+  API-key-scoped merchant view (the merchant dashboard would be a filter over the same
+  data), and no way to create, disable or reset an operator except through the environment
+  and a restart. Both wait on the audit model below.
 - **Resolving `underpaid_expired`.** The console surfaces these payments and the funds held
   against them, but the state has no exit in the code. Resolving one means a refund or a
   manual credit, both of which mutate balances and need an audit trail and authentication
