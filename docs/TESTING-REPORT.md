@@ -158,7 +158,7 @@ EIP-681 URI   : ethereum:0x036CbD53842c5426634e7929541eC2318f3dCF7e@84532/transf
 - `GET /api/payments/s6qv5p8a8zxy3n` (authed) → 200, full payment JSON with metadata.
 - `GET /public/payments/s6qv5p8a8zxy3n/checkout` → 200 with EIP-681 `payment_uri`, QR
   `data:image/png;base64,…`, `decimals: 6`.
-- `GET /pay/s6qv5p8a8zxy3n` (React SPA) → 200.
+- `GET /pay/s6qv5p8a8zxy3n` (Solid SPA) → 200.
 
 > To settle it end-to-end once Alchemy is enabled (§7.2): send **12.195122 USDC** on
 > Base Sepolia from a test wallet (§5) to `0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc`.
