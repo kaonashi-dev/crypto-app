@@ -1,16 +1,31 @@
 # Crypto payment gateway (MVP)
 
-Crypto payment gateway: charges denominated in **COP**, payable in **USDC** on EVM
-**testnets** (Ethereum Sepolia and Base Sepolia) or **USDT on Tron** (Nile testnet),
-with a unique address per payment, on-chain detection (Alchemy WebSockets on EVM,
-TronGrid polling on Tron), partial-payment handling with a grace window, a QR checkout,
-signed (HMAC) webhooks, and COP balance crediting.
+Crypto payment gateway: charges denominated in **COP**, payable in stablecoins or in a
+chain's own coin across EVM **testnets** (Ethereum Sepolia, Base Sepolia, BNB Smart Chain
+testnet, Polygon Amoy) and **Tron** (Nile testnet), with a unique address per payment,
+on-chain detection (Alchemy WebSockets on EVM, TronGrid polling on Tron), partial-payment
+handling with a grace window, a QR checkout, signed (HMAC) webhooks, and COP balance
+crediting.
 
-| Network | Asset | Detection | Address |
+| Network | Assets | Detection | Address |
 |---|---|---|---|
 | `eth-sepolia` | USDC | Alchemy WS + chunked `getLogs` backfill | `m/44'/60'/0'/0/i` → `0x…` |
 | `base-sepolia` | USDC | Alchemy WS + chunked `getLogs` backfill | `m/44'/60'/0'/0/i` → `0x…` |
-| `tron-nile` | USDT | TronGrid polling (no WS on Tron) | `m/44'/195'/0'/0/i` → `T…` |
+| `bsc-testnet` | USDT, USDC (18 dec), **BNB** | logs for tokens, block scan for BNB | `m/44'/60'/0'/0/i` → `0x…` |
+| `polygon-amoy` | USDC, **POL** | logs for tokens, block scan for POL | `m/44'/60'/0'/0/i` → `0x…` |
+| `tron-nile` | USDT, **TRX** | TronGrid polling (no WS on Tron) | `m/44'/195'/0'/0/i` → `T…` |
+
+Two mainnets ship defined but **not served**: `bsc` (USDT, USDC, BNB) and `polygon`
+(USDC, USDT, POL). They are quotable only with `ENABLE_MAINNETS=true`, which also arms the
+seed check — see [Mainnets](#mainnets).
+
+Assets in bold are the chain's own coin, which is not a token: it emits no `Transfer`
+event, so nothing can filter or push it and it is found by reading blocks instead. That
+difference is the reason for the separate native watcher, and for the cost note below.
+
+**Decimals are per pairing, not per symbol.** USDC is 6 decimals on Polygon and 18 on BSC;
+`copToRaw` and every column that stores a raw amount are sized for uint256 accordingly.
+Nothing may assume 6.
 
 **Stack:** Bun + TypeScript + Hono + Drizzle ORM + PostgreSQL + viem + Alchemy + TronGrid.
 **Web UI:** SolidJS + TanStack Query/Router + Tailwind CSS v4, built with Vite (`./web`),
@@ -18,9 +33,9 @@ served by the backend.
 
 > See [`docs/OVERVIEW.md`](docs/OVERVIEW.md) for the project's objective and context.
 
-> Testnet only. The mnemonic lives in `.env` for development only. In production you
-> derive from an **xpub** (no private keys on the server) and sweep funds from a cold
-> environment.
+> Testnets by default: the two mainnets are defined but withheld behind `ENABLE_MAINNETS`.
+> The mnemonic lives in `.env` for development only. In production you derive from an
+> **xpub** (no private keys on the server) and sweep funds from a cold environment.
 
 ## How it works
 
@@ -29,11 +44,15 @@ served by the backend.
    **unique HD address** is derived for that payment, on the chain's own coin type.
 3. The payer opens the `checkout_url` (`/pay/:publicId`): QR, copyable address,
    countdown, and polling every 10 s.
-4. The **watcher** (Alchemy WS filtered by the indexed `to` topic on EVM; TronGrid polling
-   on Tron) detects the `Transfer`; the **confirmer** waits for confirmations (5 on
-   Sepolia, 3 on Base Sepolia, 19 on Tron) with an anti-reorg re-check; once the amount is
+4. The **watcher** detects the transfer — Alchemy WS filtered by the indexed `to` topic for
+   tokens on EVM, a block scan for native coins, TronGrid polling for both on Tron; the
+   **confirmer** waits for confirmations (5 on Sepolia, 3 on Base Sepolia, 12 on BSC
+   testnet, 64 on Amoy, 19 on Tron) with an anti-reorg re-check; once the amount is
    complete (within the 0.5% dust tolerance) the payment becomes `paid`, the COP balance
    is credited, and the `payment.paid` webhook is enqueued.
+   A deposit that arrives in a **different asset** than the one quoted — easy now that one
+   address accepts USDT, USDC and the native coin — is recorded for reconciliation and
+   never credited: settling it would price the payment against a rate nobody quoted.
 5. **Partial payments:** the first deposit opens a 90-minute grace window to complete the
    amount **at the frozen rate**. If it lapses without completing → `underpaid_expired`.
 
@@ -44,8 +63,11 @@ State machine: `pending → detecting → partially_paid → paid`, with branche
 
 - Bun ≥ 1.1
 - PostgreSQL 15+
-- For the EVM networks: an Alchemy account with **Ethereum Sepolia** and **Base Sepolia**
-  enabled on the app
+- For the EVM networks: an Alchemy account with **Ethereum Sepolia**, **Base Sepolia**,
+  **BNB Smart Chain testnet** and **Polygon Amoy** enabled on the app, one key per network
+  (`ALCHEMY_SEPOLIA_KEY`, `ALCHEMY_BASE_SEPOLIA_KEY`, `ALCHEMY_BSC_TESTNET_KEY`,
+  `ALCHEMY_AMOY_KEY`). A network whose key is missing still accepts payments and derives
+  addresses — nothing watches it, and the boot names it.
 - For `tron-nile`: nothing — TronGrid serves the public testnet without a key. Set
   `TRONGRID_API_KEY` only if you hit the per-IP rate limit.
 - A **new** mnemonic, generated for this gateway alone (`bun run mnemonic:new`)
@@ -92,14 +114,27 @@ curl -s -X POST http://localhost:3000/api/payments \
   -d '{"amount_cop": 60000, "asset": "USDT", "network": "tron-nile"}'
 ```
 
+Or charge in a chain's own coin — BEP20's BNB, Polygon's POL, Tron's TRX:
+
+```bash
+curl -s -X POST http://localhost:3000/api/payments \
+  -H "X-Api-Key: gk_test_..." -H "Content-Type: application/json" \
+  -d '{"amount_cop": 50000, "asset": "BNB", "network": "bsc-testnet"}'
+```
+
 Asset/network pairings are validated against the registry in `src/config.ts`; asking for
-`USDT` on an EVM network (or `USDC` on Tron) returns `400 Unsupported asset/network
-combination`.
+`USDT` on Amoy (Tether publishes no canonical deployment there) or `BNB` on Polygon returns
+`400 Unsupported asset/network combination`.
 
-**Test USDC (EVM):** `faucet.circle.com` (pick the network). You also need testnet ETH for
-gas. Verify the testnet token addresses in Circle's docs before use.
+**Test USDC (EVM):** `faucet.circle.com` (pick the network) for Sepolia, Base Sepolia and
+Amoy. You also need the chain's gas coin. Verify token addresses in Circle's docs before use.
 
-**Test USDT (Tron Nile):** [`nileex.io/join/getJoinPage`](https://nileex.io/join/getJoinPage)
+**Test BNB and BEP20:** [`bnbchain.org/en/testnet-faucet`](https://www.bnbchain.org/en/testnet-faucet)
+gives test BNB, which is both the gas and a payable asset here.
+
+**Test POL:** [`faucet.polygon.technology`](https://faucet.polygon.technology).
+
+**Test USDT and TRX (Tron Nile):** [`nileex.io/join/getJoinPage`](https://nileex.io/join/getJoinPage)
 gives test TRX and test USDT. Receiving TRC-20 costs the payer bandwidth/energy, not the
 gateway; you only need TRX in the receiving account when you later sweep funds out.
 
@@ -258,14 +293,15 @@ src/
   services/
     rates.ts           (CoinGecko USD) x (FX USD->COP) + spread + cache + copToRaw (rounds up)
     wallet.ts          HD derivation per family (EVM m/44'/60', Tron m/44'/195')
-    tron.ts            Base58Check codec + TronGrid client + Transfer-log decoding
+    tron.ts            Base58Check codec + TronGrid client + Transfer-log/TRX decoding
     payments.ts        state machine (create / register deposit / confirm / expire)
     webhooks.ts        HMAC signing + retry queue
   workers/
     supervisor.ts      probes each network, starts its workers once the RPC answers
     watcher.ts         Alchemy WS -> Transfer events (+ chunked getLogs backfill)
+    native-watcher.ts  block scan -> native coin transfers (BNB, POL: no event to filter)
     confirmer.ts       advances confirmations, anti-reorg re-check, settles
-    tron-watcher.ts    TronGrid polling -> TRC-20 transfers (no WS on Tron)
+    tron-watcher.ts    TronGrid polling -> TRC-20 transfers + native TRX (no WS on Tron)
     tron-confirmer.ts  same contract as confirmer.ts, over TronGrid
     rpc-log.ts         compact, de-duplicated RPC error logging
     expirer.ts         expires quotes/grace windows + delivers webhooks
@@ -420,7 +456,7 @@ bills for wall-clock time.
   console signs operators in with, so a deployment can never boot with a console nobody can
   reach *and* nobody can be kept out of. `SIGTERM` drains the Postgres pool before exit.
 - The same preflight exits on an `HD_MNEMONIC` that fails its BIP-39 checksum, and on one
-  of the published test mnemonics whenever any registered network is not a testnet — that
+  of the published test mnemonics whenever any *offered* network is not a testnet — that
   pairing means every address the gateway hands a payer has a private key in a README
   somewhere. On testnets it is a warning instead, since that is a legitimate way to work.
 - **One database, one tree.** `hd_counter` stores the BIP-32 fingerprint of the mnemonic
@@ -431,6 +467,29 @@ bills for wall-clock time.
   nothing worth recovering — `UPDATE hd_counter SET seed_fingerprint = NULL WHERE id = 1`
   before the first boot on the new seed. Addresses already handed to payers keep deriving
   from the old mnemonic either way; that is what makes this a decision and not a setting.
+
+## Mainnets
+
+`bsc` (USDT, USDC, BNB) and `polygon` (USDC, USDT, POL) are defined in the registry but
+**not served** unless `ENABLE_MAINNETS=true`. Withheld is not the same as absent: the
+definitions stay loaded, so a payment taken on one still renders in the console and
+resolves its explorer links — the API simply will not quote the network or derive an
+address on it. `/admin/api/diagnostics` reports both facts per network (`offered`,
+`enabled`).
+
+The flag is not a formality, and it is deliberately not inferred from whether an RPC key
+is present — a network with no key still hands out addresses, it just never watches them.
+Switching it on means:
+
+1. **A private mnemonic first.** The preflight refuses to boot when a publicly known
+   `HD_MNEMONIC` (hardhat/anvil, ganache, the BIP-39 vector) meets any offered mainnet:
+   every address the gateway would hand a payer has a published private key. Generate one
+   with `bun run mnemonic:new --write`. Because `hd_counter` binds the database to one
+   tree, that rotation also means a fresh database — see the note above.
+2. **Real confirmations.** 15 blocks on BSC, 128 on Polygon (~4 min) before a payment
+   settles.
+3. **Real sweeping.** Funds accumulate at per-payment HD addresses. Nothing here moves
+   them; that is the cold-side job listed under *Pending for production*.
 
 ## Provider cost
 
@@ -459,7 +518,8 @@ Provider calls per hour, at the defaults:
 |---|---:|---:|
 | Idle (no open payments) | ~780 | ~4 |
 | 1 open Tron payment | 600 | 60 + 1 per button press |
-| 1 open EVM payment | 720 (300 of them `getLogs`) | 72 (60 `getLogs`) |
+| 1 open EVM token payment | 720 (300 of them `getLogs`) | 72 (60 `getLogs`) |
+| 1 open EVM **native** payment | n/a | 1 per block (see below) |
 | A network left disabled | 60 probes | 4 (exponential backoff, 15 min cap) |
 
 > The checkout's 10 s status poll and the console's refresh only read Postgres — they cost
@@ -469,6 +529,17 @@ Provider calls per hour, at the defaults:
 `eth_getLogs` dominates the EVM bill (Alchemy prices it far above `eth_blockNumber`), which
 is why the backfill window and interval are the first dials to reach for. Live detection is
 the WebSocket; the backfill only has to catch what a reconnection missed.
+
+**Native coins are the expensive asset, and structurally so.** A token transfer is an event:
+the node indexes it, filters it by recipient server-side and pushes only the matches, so a
+thousand idle blocks cost nothing. A native transfer is a field on the transaction — there
+is no event, no filter and no subscription for it, so the only way to find one is to read
+every block and look at each transaction in it. While a BNB or POL payment is open the
+watcher therefore spends one `eth_getBlockByNumber` per block: roughly 1,200/hour on BSC's
+sub-second blocks, 1,800/hour on Polygon. Rule 1 still holds — it reads **nothing** while
+no payment is quoted in a native coin, which is the normal state — but a checkout that
+offers BNB or POL should expect that bill for as long as the payer takes. If it matters,
+quote the stablecoin.
 
 ## Built-in robustness
 

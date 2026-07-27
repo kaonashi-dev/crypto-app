@@ -9,6 +9,15 @@ export type NetworkMeta = {
   confirmations: number;
   explorer: { tx: string; address: string };
   chain_id: number | null;
+  testnet: boolean;
+  tokens: string[];
+  /** Symbol of the chain's own coin, or null when it is not accepted. */
+  native: string | null;
+  /**
+   * Whether the gateway still offers this network. A withheld mainnet keeps its
+   * definition — old payments have to keep rendering — but takes no new ones.
+   */
+  offered: boolean;
 };
 
 export type Stats = {
@@ -75,7 +84,11 @@ export type DepositRow = {
   created_at: string;
   payment_id: string;
   payment_status: PaymentStatus;
+  /** The asset that actually arrived, which is not always the one quoted. */
   asset: string;
+  payment_asset: string;
+  /** False when the deposit is in an asset the payment never quoted. */
+  settles: boolean;
   decimals: number;
 };
 
@@ -111,9 +124,19 @@ export type PaymentDetail = {
     webhook_url: string | null;
     is_active: boolean;
   };
-  token: { address: string; decimals: number; symbol: string } | null;
+  // `address` is null for a chain-native coin: there is no contract behind it.
+  token: {
+    address: string | null;
+    decimals: number;
+    symbol: string;
+    kind: "token" | "native";
+  } | null;
   network: NetworkMeta | null;
-  deposits: Array<Omit<DepositRow, "network" | "payment_id" | "payment_status" | "asset" | "decimals">>;
+  deposits: Array<
+    Omit<DepositRow, "network" | "payment_id" | "payment_status" | "payment_asset"> & {
+      network?: undefined;
+    }
+  >;
   webhooks: WebhookRow[];
   ledger: LedgerRow[];
 };

@@ -1,6 +1,7 @@
 import { createPublicClient, http } from "viem";
 import { NETWORKS, type NetworkId } from "../config";
 import { startWatcher } from "./watcher";
+import { startNativeWatcher } from "./native-watcher";
 import { startConfirmer } from "./confirmer";
 import { startTronWatcher } from "./tron-watcher";
 import { startTronConfirmer } from "./tron-confirmer";
@@ -33,6 +34,10 @@ function driver(network: NetworkId) {
     probe: () => client.getBlockNumber(),
     start: () => {
       startWatcher(network);
+      // Separate worker, because the chain's own coin is found by reading blocks
+      // rather than by filtering logs. A no-op on a network that does not accept
+      // its native coin.
+      if (net.native) startNativeWatcher(network);
       startConfirmer(network);
     },
   };

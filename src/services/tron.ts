@@ -184,6 +184,94 @@ export async function getTrc20Transfers(
   return json.data ?? [];
 }
 
+export type TronNativeTx = {
+  txID: string;
+  blockNumber?: number;
+  block_timestamp?: number;
+  ret?: Array<{ contractRet?: string }>;
+  raw_data?: {
+    contract?: Array<{
+      type?: string;
+      parameter?: {
+        value?: { amount?: number; owner_address?: string; to_address?: string };
+      };
+    }>;
+  };
+};
+
+/**
+ * Every transaction involving `address`, newest first — the native TRX feed.
+ *
+ * A TRX transfer is a `TransferContract` on the transaction itself, not a
+ * contract event, so it never appears in the TRC-20 listing above and has to be
+ * read from the account's own transaction history. The upside over the TRC-20
+ * path is that this response already carries `blockNumber` and `contractRet`,
+ * so a native deposit costs one call instead of two.
+ *
+ * `search_internal=false`: TRX moved by a contract call (an exchange sweeping
+ * through a router) arrives as an internal transaction with a shape of its own.
+ * Excluded deliberately so this stays the same "top-level transfers only"
+ * contract as the EVM native watcher, rather than being quietly broader on one
+ * chain than the other.
+ */
+export async function getNativeTransfers(
+  net: TronNetworkDef,
+  address: string,
+  since: Date,
+  limit = 50
+): Promise<TronNativeTx[]> {
+  const qs = new URLSearchParams({
+    only_confirmed: "false",
+    search_internal: "false",
+    limit: String(limit),
+    min_timestamp: String(since.getTime()),
+  });
+  const json = await get<{ data?: TronNativeTx[]; success?: boolean }>(
+    net,
+    `/v1/accounts/${address}/transactions?${qs}`
+  );
+  return json.data ?? [];
+}
+
+/**
+ * Reads an incoming TRX transfer out of a listed transaction, or null when it
+ * is not one (a contract call, an outgoing transfer, a failed transaction).
+ *
+ * Addresses in `raw_data` are 0x41-prefixed hex, so the recipient is re-encoded
+ * to Base58 before comparison — the same conversion the TRC-20 path does on log
+ * topics.
+ */
+export function parseNativeTransfer(
+  tx: TronNativeTx,
+  toBase58: string
+): { from: string; amountRaw: bigint; blockNumber: bigint } | null {
+  const contract = tx.raw_data?.contract?.[0];
+  if (contract?.type !== "TransferContract") return null;
+
+  const value = contract.parameter?.value;
+  const to = value?.to_address;
+  const amount = value?.amount;
+  if (!to || typeof amount !== "number" || amount <= 0) return null;
+  if (hexToBase58Address(to) !== toBase58) return null;
+
+  // A transaction can be mined and still have failed (OUT_OF_ENERGY, REVERT);
+  // only SUCCESS moved value. Absent means the node did not say, which for a
+  // plain transfer is success.
+  const result = tx.ret?.[0]?.contractRet;
+  if (result && result !== "SUCCESS") return null;
+
+  if (typeof tx.blockNumber !== "number") return null; // not mined yet
+  if (!value.owner_address) return null;
+
+  return {
+    from: hexToBase58Address(value.owner_address),
+    // `amount` is sun (6 decimals) and arrives as a JSON number. Exact below
+    // ~9e15 sun (about 9 million TRX), which is far above any checkout.
+    amountRaw: BigInt(amount),
+    blockNumber: BigInt(tx.blockNumber),
+  };
+}
+
 export type TronTxInfo = {
   id: string;
   blockNumber: number;

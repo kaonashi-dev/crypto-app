@@ -116,7 +116,7 @@ function Deposits(props: { d: PaymentDetail }) {
                       />
                     </td>
                     <td class="px-4 py-3 font-mono text-[0.76rem] text-ink-3 tabular-nums">
-                      {dep.log_index}
+                      {dep.log_index < 0 ? "native" : dep.log_index}
                     </td>
                     <td class="max-w-[180px] px-4 py-3">
                       <Hash
@@ -128,7 +128,12 @@ function Deposits(props: { d: PaymentDetail }) {
                       />
                     </td>
                     <td class="px-4 py-3 text-right font-mono text-[0.78rem] whitespace-nowrap text-ink tabular-nums">
-                      {fmtUnits(dep.amount_raw, payment().decimals)} {payment().asset}
+                      {fmtUnits(dep.amount_raw, dep.decimals)} {dep.asset}
+                      <Show when={!dep.settles}>
+                        <p class="mt-0.5 font-sans text-[0.68rem] text-serious">
+                          not the quoted asset — never credited
+                        </p>
+                      </Show>
                     </td>
                     <td class="px-4 py-3 text-right font-mono text-[0.76rem] text-ink-2 tabular-nums">
                       {BigInt(dep.block_number).toLocaleString("en-US")}
@@ -479,13 +484,26 @@ function Detail(props: { d: PaymentDetail }) {
                 fallback={<span class="text-ink-3">unknown</span>}
               >
                 {(token) => (
-                  <Hash
-                    value={token().address}
-                    explorer={props.d.network?.explorer.address}
-                    kind="address"
-                    head={10}
-                    tail={6}
-                  />
+                  // A chain-native coin has no contract to link to, so the
+                  // symbol is the whole answer rather than a missing address.
+                  <Show
+                    when={token().address}
+                    fallback={
+                      <span class="text-[0.78rem]">
+                        {token().symbol} <span class="text-ink-3">· chain-native</span>
+                      </span>
+                    }
+                  >
+                    {(address) => (
+                      <Hash
+                        value={address()}
+                        explorer={props.d.network?.explorer.address}
+                        kind="address"
+                        head={10}
+                        tail={6}
+                      />
+                    )}
+                  </Show>
                 )}
               </Show>
             </Field>

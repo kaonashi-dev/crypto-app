@@ -10,7 +10,7 @@ import "./quiet"; // must precede every ../src import
 import { randomBytes } from "crypto";
 import { app } from "../src/api/routes";
 import { db, schema, sql } from "../src/db";
-import { env } from "../src/config";
+import { env, NETWORKS, NETWORK_IDS } from "../src/config";
 import { copToRaw } from "../src/services/rates";
 import { deriveAddress, reserveDerivationIndex } from "../src/services/wallet";
 import { bootstrapOperator } from "../src/services/admin-auth";
@@ -103,6 +103,7 @@ async function main() {
       txHash: confirmedTx,
       logIndex: 0,
       fromAddress: "0xconsolepayer",
+      asset: "USDC",
       amountRaw: 4_000_000n,
       blockNumber: 1234n,
       confirmed: true,
@@ -113,6 +114,7 @@ async function main() {
       txHash: pendingTx,
       logIndex: 1,
       fromAddress: "0xconsolepayer",
+      asset: "USDC",
       amountRaw: 2_000_000n,
       blockNumber: 1240n,
       confirmed: false,
@@ -354,9 +356,28 @@ async function main() {
   assert(r.body.service?.["service.name"] === "crypto-gateway", "service resource attributes present");
   assert(typeof r.body.process?.uptime_s === "number", "process uptime reported");
   assert(r.body.config?.["config.dust_bps"] === Number(env.dustBps), "live dust tolerance reported");
+  // Counted from the registry, not a literal: diagnostics reports every network
+  // that exists, including mainnets the build is withholding.
   assert(
-    r.body.networks?.length === 3 && r.body.networks.every((n: any) => "enabled" in n),
+    r.body.networks?.length === Object.keys(NETWORKS).length &&
+      r.body.networks.every((n: any) => "enabled" in n),
     "every network reported with its enabled flag"
+  );
+  assert(
+    r.body.networks.every((n: any) => n.offered === NETWORK_IDS.includes(n.id)),
+    "diagnostics distinguishes offered networks from withheld ones"
+  );
+  const withheld = r.body.networks.filter((n: any) => !n.offered);
+  assert(
+    withheld.every((n: any) => n.testnet === false) &&
+      withheld.every((n: any) => n.enabled === false),
+    "only mainnets are withheld, and a withheld network never reads as enabled"
+  );
+  const bsc = r.body.networks.find((n: any) => n.id === "bsc-testnet");
+  assert(bsc?.native === "BNB", "bsc-testnet reports BNB as its native asset");
+  assert(
+    Array.isArray(bsc?.tokens) && bsc.tokens.includes("USDT") && bsc.tokens.includes("USDC"),
+    "bsc-testnet reports both BEP20 tokens"
   );
   assert(typeof r.body.logging?.level === "string", "effective log level reported");
   assert(r.body.metrics?.counters !== undefined, "metric counters present");

@@ -58,10 +58,14 @@ async function makePayment(
   clientId: string,
   amountCop: bigint,
   network: NetworkId,
-  quoteExpiresAt = new Date(Date.now() + 15 * 60_000)
+  quoteExpiresAt = new Date(Date.now() + 15 * 60_000),
+  // Asset and decimals are parameters because they no longer travel together:
+  // the same symbol is 6 decimals on one network and 18 on another, and the
+  // native coins add a third combination.
+  asset = "USDC",
+  decimals = 6
 ) {
-  const rate = 4_000_000_000n; // 4,000 COP per USDC, scaled x1e6
-  const decimals = 6;
+  const rate = 4_000_000_000n; // 4,000 COP per whole unit, scaled x1e6
   const amountCryptoRaw = copToRaw(amountCop, rate, decimals);
   const idx = await reserveDerivationIndex();
   const address = deriveAddress(idx, network);
@@ -71,7 +75,7 @@ async function makePayment(
       publicId: "test_" + randomBytes(6).toString("hex"),
       clientId,
       amountCop,
-      asset: "USDC",
+      asset,
       network,
       amountCryptoRaw,
       rateCopPerUnitE6: rate,
@@ -177,7 +181,8 @@ async function main() {
   const tx1 = "0x" + randomBytes(32).toString("hex");
   await registerDeposit({
     network: net, address: p1.address, txHash: tx1, logIndex: 0,
-    from: "0xpayer", amountRaw: p1.amountCryptoRaw, blockNumber: 100n,
+    from: "0xpayer",
+    asset: "USDC", amountRaw: p1.amountCryptoRaw, blockNumber: 100n,
   });
   let p1r = await reload(p1.id);
   assert(p1r.status === "detecting", "after first deposit -> detecting");
@@ -197,7 +202,8 @@ async function main() {
   // re-registering the same log is a no-op (unique index)
   await registerDeposit({
     network: net, address: p1.address, txHash: tx1, logIndex: 0,
-    from: "0xpayer", amountRaw: p1.amountCryptoRaw, blockNumber: 100n,
+    from: "0xpayer",
+    asset: "USDC", amountRaw: p1.amountCryptoRaw, blockNumber: 100n,
   });
   await confirmDeposit((await depositRowFor(p1.id, tx1)).id); // already confirmed -> no-op
   assert((await clientBalance(client.id)) === balAfterPaid, "no double credit on replay");
@@ -209,7 +215,8 @@ async function main() {
   const txA = "0x" + randomBytes(32).toString("hex");
   await registerDeposit({
     network: net, address: p2.address, txHash: txA, logIndex: 0,
-    from: "0xpayer", amountRaw: 4_000000n, blockNumber: 200n, // 4 USDC
+    from: "0xpayer",
+    asset: "USDC", amountRaw: 4_000000n, blockNumber: 200n, // 4 USDC
   });
   await confirmDeposit((await depositRowFor(p2.id, txA)).id);
   let p2r = await reload(p2.id);
@@ -220,7 +227,8 @@ async function main() {
   const txB = "0x" + randomBytes(32).toString("hex");
   await registerDeposit({
     network: net, address: p2.address, txHash: txB, logIndex: 0,
-    from: "0xpayer", amountRaw: 6_000000n, blockNumber: 210n, // 6 USDC -> total 10
+    from: "0xpayer",
+    asset: "USDC", amountRaw: 6_000000n, blockNumber: 210n, // 6 USDC -> total 10
   });
   await confirmDeposit((await depositRowFor(p2.id, txB)).id);
   p2r = await reload(p2.id);
@@ -235,7 +243,8 @@ async function main() {
   const txO = "0x" + randomBytes(32).toString("hex");
   await registerDeposit({
     network: net, address: p3.address, txHash: txO, logIndex: 0,
-    from: "0xpayer", amountRaw: 12_000000n, blockNumber: 300n, // 12 USDC
+    from: "0xpayer",
+    asset: "USDC", amountRaw: 12_000000n, blockNumber: 300n, // 12 USDC
   });
   await confirmDeposit((await depositRowFor(p3.id, txO)).id);
   const p3r = await reload(p3.id);
@@ -250,7 +259,8 @@ async function main() {
   const txD = "0x" + randomBytes(32).toString("hex");
   await registerDeposit({
     network: net, address: p4.address, txHash: txD, logIndex: 0,
-    from: "0xpayer", amountRaw: 9_960000n, blockNumber: 400n, // 9.96 USDC >= 9.95
+    from: "0xpayer",
+    asset: "USDC", amountRaw: 9_960000n, blockNumber: 400n, // 9.96 USDC >= 9.95
   });
   await confirmDeposit((await depositRowFor(p4.id, txD)).id);
   const p4r = await reload(p4.id);
@@ -271,7 +281,8 @@ async function main() {
   const txU = "0x" + randomBytes(32).toString("hex");
   await registerDeposit({
     network: net, address: p6.address, txHash: txU, logIndex: 0,
-    from: "0xpayer", amountRaw: 4_000000n, blockNumber: 500n, // 4 of 10 USDC
+    from: "0xpayer",
+    asset: "USDC", amountRaw: 4_000000n, blockNumber: 500n, // 4 of 10 USDC
   });
   await confirmDeposit((await depositRowFor(p6.id, txU)).id);
   assert((await reload(p6.id)).status === "partially_paid", "partial deposit -> partially_paid");
@@ -290,11 +301,74 @@ async function main() {
   );
   assert((await clientBalance(client.id)) === balB5, "expiry credits no COP");
 
+  // --- 18-decimal assets -------------------------------------------
+  // Regression guard for the column type. BEP20 USDT is 18-decimal, so 50,000
+  // COP of it is ~1.25e19 raw — past the 9.223e18 ceiling of the int8 columns
+  // these amounts used to live in. Postgres does not round a numeric overflow,
+  // it raises, so the old schema failed to record a deposit that was already
+  // on-chain. Every assertion here passes trivially at 6 decimals; the point is
+  // the magnitude.
+  console.log("\n[flow] 18-decimal asset (BEP20)");
+  const INT8_MAX = 9_223_372_036_854_775_807n;
+  const bsc: NetworkId = "bsc-testnet";
+  const p8 = await makePayment(client.id, 50_000n, bsc, undefined, "USDT", 18);
+  assert(p8.amountCryptoRaw === 12_500_000_000_000_000_000n, "50k COP -> 12.5 USDT at 18 decimals");
+  assert(p8.amountCryptoRaw > INT8_MAX, "the amount genuinely exceeds int8 — the guard is real");
+
+  const balB8 = await clientBalance(client.id);
+  const txH = "0x" + randomBytes(32).toString("hex");
+  await registerDeposit({
+    network: bsc, address: p8.address, txHash: txH, logIndex: 0,
+    from: "0xpayer",
+    asset: "USDT", amountRaw: 12_500_000_000_000_000_000n, blockNumber: 800n,
+  });
+  const dep8 = await depositRowFor(p8.id, txH);
+  assert(
+    dep8.amountRaw === 12_500_000_000_000_000_000n,
+    "an 18-decimal deposit round-trips through the database exactly"
+  );
+  await confirmDeposit(dep8.id);
+  const p8r = await reload(p8.id);
+  assert(p8r.status === "paid", "18-decimal payment settles");
+  assert(p8r.confirmedRaw === 12_500_000_000_000_000_000n, "confirmedRaw holds the full wei amount");
+  assert((await clientBalance(client.id)) === balB8 + 50_000n, "credited 50,000 COP");
+
+  // --- wrong asset to the right address -----------------------------
+  // A network now carries several assets and one address accepts all of them.
+  // A payer who picks USDT in their wallet for a USDC invoice sends real value
+  // to a real address of ours; crediting it would settle the payment against a
+  // price that was never quoted.
+  console.log("\n[flow] deposit in the wrong asset");
+  const p9 = await makePayment(client.id, 50_000n, bsc, undefined, "USDC", 18);
+  const balB9 = await clientBalance(client.id);
+  const txW = "0x" + randomBytes(32).toString("hex");
+  await registerDeposit({
+    network: bsc, address: p9.address, txHash: txW, logIndex: 0,
+    from: "0xconfusedpayer",
+    asset: "USDT", amountRaw: 99_000_000_000_000_000_000n, blockNumber: 810n,
+  });
+  const p9r = await reload(p9.id);
+  const dep9 = await depositRowFor(p9.id, txW);
+  assert(dep9 !== undefined, "the wrong-asset deposit is still recorded for reconciliation");
+  assert(dep9.asset === "USDT", "the deposit records what actually arrived, not what was quoted");
+  assert(p9r.pendingRaw === 0n, "a wrong-asset deposit never counts towards pending");
+  assert(p9r.status === "pending", "and never moves the payment out of pending");
+
+  await confirmDeposit(dep9.id);
+  const p9c = await reload(p9.id);
+  assert(p9c.confirmedRaw === 0n, "confirming a wrong-asset deposit credits nothing");
+  assert(p9c.status !== "paid", "a payment cannot settle on an asset it did not quote");
+  assert((await clientBalance(client.id)) === balB9, "the merchant balance is untouched");
+  assert(
+    (await depositRowFor(p9.id, txW)).confirmed === true,
+    "it is marked confirmed so the confirmer stops re-reading it"
+  );
+
   // --- webhook jobs enqueued ---------------------------------------
   console.log("\n[webhooks] jobs enqueued");
   const jobs = await db.select().from(schema.webhookJobs).where(eq(schema.webhookJobs.clientId, client.id));
   const events = jobs.map((j) => j.event).sort();
-  assert(events.filter((e) => e === "payment.paid").length === 4, "4 payment.paid jobs enqueued");
+  assert(events.filter((e) => e === "payment.paid").length === 5, "5 payment.paid jobs enqueued");
   assert(events.includes("payment.partially_paid"), "partially_paid job enqueued");
   assert(events.includes("payment.expired"), "expired job enqueued");
   assert(events.includes("payment.underpaid_expired"), "underpaid_expired job enqueued");

@@ -1,8 +1,24 @@
 import {
-  pgTable, uuid, text, timestamp, bigint, integer, boolean,
+  pgTable, uuid, text, timestamp, bigint, numeric, integer, boolean,
   pgEnum, uniqueIndex, index,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+
+/**
+ * A raw on-chain amount, in the token's smallest unit.
+ *
+ * `numeric(78, 0)` and not `bigint`, because int8 tops out at ~9.22e18 and an
+ * 18-decimal asset blows straight through that: 50,000 COP of BEP20 USDT is
+ * ~1.2e19 wei, and POL passes int8 at roughly 7,700 COP. The column would not
+ * round — Postgres raises `numeric field overflow` and the deposit fails to
+ * record, losing a payment that is already on-chain. 78 digits is the width of
+ * uint256, so no ERC-20 amount can exceed it.
+ *
+ * mode "bigint" keeps the TypeScript side exactly as it was: bigint in, bigint
+ * out, never a float.
+ */
+const rawAmount = (name: string) =>
+  numeric(name, { precision: 78, scale: 0, mode: "bigint" });
 
 export const paymentStatus = pgEnum("payment_status", [
   "pending",            // created, waiting for funds
@@ -33,18 +49,20 @@ export const payments = pgTable("payments", {
   publicId: text("public_id").notNull(),          // for the /pay/:publicId URL
   clientId: uuid("client_id").notNull().references(() => clients.id),
   amountCop: bigint("amount_cop", { mode: "bigint" }).notNull(),
-  asset: text("asset").notNull(),                  // 'USDC'
-  network: text("network").notNull(),              // 'eth-sepolia' | 'base-sepolia'
-  // Required amount in raw token units (USDC -> 6 decimals)
-  amountCryptoRaw: bigint("amount_crypto_raw", { mode: "bigint" }).notNull(),
+  asset: text("asset").notNull(),                  // 'USDC' | 'USDT' | 'BNB' | 'POL' | 'TRX'
+  network: text("network").notNull(),              // see NETWORKS in src/config.ts
+  // Required amount in the asset's smallest unit. Decimals vary by pairing —
+  // 6 for USDC on Polygon, 18 for the same symbol on BSC — so they are read
+  // from the registry per payment, never assumed.
+  amountCryptoRaw: rawAmount("amount_crypto_raw").notNull(),
   // Frozen rate: COP per 1 whole token unit, scaled x1e6 for precision
   rateCopPerUnitE6: bigint("rate_cop_per_unit_e6", { mode: "bigint" }).notNull(),
   address: text("address").notNull(),              // unique address for the payment
   derivationIndex: integer("derivation_index").notNull(),
   status: paymentStatus("status").notNull().default("pending"),
-  confirmedRaw: bigint("confirmed_raw", { mode: "bigint" }).notNull().default(sql`0`),
-  pendingRaw: bigint("pending_raw", { mode: "bigint" }).notNull().default(sql`0`),
-  overpaidRaw: bigint("overpaid_raw", { mode: "bigint" }).notNull().default(sql`0`),
+  confirmedRaw: rawAmount("confirmed_raw").notNull().default(sql`0`),
+  pendingRaw: rawAmount("pending_raw").notNull().default(sql`0`),
+  overpaidRaw: rawAmount("overpaid_raw").notNull().default(sql`0`),
   quoteExpiresAt: timestamp("quote_expires_at").notNull(),
   graceExpiresAt: timestamp("grace_expires_at"),   // set on the first deposit
   paidAt: timestamp("paid_at"),
@@ -57,15 +75,25 @@ export const payments = pgTable("payments", {
   index("payments_status_idx").on(t.status),
 ]);
 
-// -- On-chain deposits (one per Transfer event) -----------------------
+// -- On-chain deposits (one per Transfer event, or per native transfer) ---
 export const deposits = pgTable("deposits", {
   id: uuid("id").primaryKey().defaultRandom(),
   paymentId: uuid("payment_id").notNull().references(() => payments.id),
   network: text("network").notNull(),
   txHash: text("tx_hash").notNull(),
+  // Position of the Transfer log inside the transaction, and -1 for a native
+  // coin transfer, which is a field on the transaction rather than a log. The
+  // sentinel is what keeps the idempotency index below total: real log indexes
+  // start at 0, so a native credit can never collide with a token one in the
+  // same transaction.
   logIndex: integer("log_index").notNull(),
   fromAddress: text("from_address").notNull(),
-  amountRaw: bigint("amount_raw", { mode: "bigint" }).notNull(),
+  // Which asset actually arrived. A network now carries several (USDT, USDC and
+  // the native coin), and an address expecting one can receive another, so the
+  // deposit records what was sent rather than inheriting the payment's asset —
+  // see the mismatch guard in services/payments.ts.
+  asset: text("asset").notNull(),
+  amountRaw: rawAmount("amount_raw").notNull(),
   blockNumber: bigint("block_number", { mode: "bigint" }).notNull(),
   confirmed: boolean("confirmed").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
