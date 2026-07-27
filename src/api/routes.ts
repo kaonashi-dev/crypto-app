@@ -404,7 +404,7 @@ app.route("/admin/api/auth", adminAuthApi);
 // Registered before the /admin/* shell route so the data routes win the match.
 app.route("/admin/api", adminApi);
 
-// -- SPA (React + Tailwind, served from ./web/dist) ---------------------
+// -- SPA (Solid + Tailwind, served from ./web/dist) ---------------------
 app.use("/assets/*", serveStatic({ root: WEB_DIST }));
 
 app.get("/pay/:publicId", spaShell);
