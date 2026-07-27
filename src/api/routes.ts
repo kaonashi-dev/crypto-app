@@ -4,7 +4,7 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import QRCode from "qrcode";
 import { db, schema } from "../db";
-import { NETWORKS, ASSETS, NETWORK_IDS, env, tokenFor, type NetworkId } from "../config";
+import { NETWORKS, ASSETS, NETWORK_IDS, env, assetFor, type NetworkId } from "../config";
 import { createPayment } from "../services/payments";
 import { publicPaymentView } from "../services/webhooks";
 import { apiKeyAuth } from "./auth";
@@ -139,20 +139,25 @@ function publicOrigin(c: Context): string {
 /**
  * Builds the QR payload + wallet deep link for a payment row.
  *
- * EVM uses EIP-681, which carries token, recipient and amount so the wallet
- * opens pre-filled. Tron has no equivalent standard that wallets agree on, so
- * its QR holds the bare Base58 address (what every Tron wallet scans) and there
- * is no deep link — `walletUri` is null and the UI tells the payer to send the
- * exact amount manually.
+ * EVM uses EIP-681 in one of its two forms: a token payment targets the
+ * *contract* and calls `transfer`, while a native one targets the payee
+ * directly and carries `value` — a native payment addressed to the token form
+ * would ask the wallet to call `transfer` on an account with no code. Tron has
+ * no equivalent standard that wallets agree on, so its QR holds the bare Base58
+ * address (what every Tron wallet scans) and there is no deep link —
+ * `walletUri` is null and the UI tells the payer to send the exact amount
+ * manually.
  */
 async function buildCheckoutAssets(p: typeof schema.payments.$inferSelect) {
   const net = NETWORKS[p.network as NetworkId];
-  const token = tokenFor(p.network as NetworkId, p.asset)!;
+  const token = assetFor(p.network as NetworkId, p.asset)!;
 
   const uri =
     net.family === "tron"
       ? p.address
-      : `ethereum:${token.address}@${net.chain.id}/transfer?address=${p.address}&uint256=${p.amountCryptoRaw}`;
+      : token.kind === "native"
+        ? `ethereum:${p.address}@${net.chain.id}?value=${p.amountCryptoRaw}`
+        : `ethereum:${token.address}@${net.chain.id}/transfer?address=${p.address}&uint256=${p.amountCryptoRaw}`;
 
   const qrDataUrl = await QRCode.toDataURL(uri, { width: 280, margin: 1 });
   return {
@@ -333,6 +338,7 @@ app.post("/public/payments/:publicId/check", async (c) => {
       await scanTronPayment(p.network as NetworkId, {
         address: p.address,
         createdAt: p.createdAt,
+        asset: p.asset,
       });
       checked = true;
     } catch (e) {

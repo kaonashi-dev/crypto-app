@@ -101,6 +101,7 @@ export function startWatcher(network: NetworkId) {
                   txHash: entry.transactionHash!,
                   logIndex: entry.logIndex!,
                   from: entry.args.from!,
+                  asset: symbol,
                   amountRaw: entry.args.value!,
                   blockNumber: entry.blockNumber!,
                 });
@@ -188,6 +189,7 @@ export function startWatcher(network: NetworkId) {
                 txHash: entry.transactionHash!,
                 logIndex: entry.logIndex!,
                 from: entry.args.from!,
+                asset: symbol,
                 amountRaw: entry.args.value!,
                 blockNumber: entry.blockNumber!,
               }); // idempotent: duplicates are dropped by the unique index

@@ -5,20 +5,26 @@ import { registerDeposit } from "../services/payments";
 import {
   base58ToHexAddress,
   findTransferLog,
+  getNativeTransfers,
   getTransactionInfo,
   getTrc20Transfers,
+  parseNativeTransfer,
 } from "../services/tron";
 import { clearRpcError, logRpcError } from "./rpc-log";
 import { getLogger, withContext, count, gauge } from "../observability";
 
 const ACTIVE = ["pending", "detecting", "partially_paid"] as const;
 
-type OpenPayment = { address: string; createdAt: Date };
+type OpenPayment = { address: string; createdAt: Date; asset: string };
 
 /** Open payments on this network, with the moment each started accepting funds. */
 async function activePayments(network: NetworkId): Promise<OpenPayment[]> {
   return db
-    .select({ address: schema.payments.address, createdAt: schema.payments.createdAt })
+    .select({
+      address: schema.payments.address,
+      createdAt: schema.payments.createdAt,
+      asset: schema.payments.asset,
+    })
     .from(schema.payments)
     .where(
       and(
@@ -139,8 +145,68 @@ export async function scanTronPayments(
           txHash: transfer.transaction_id,
           logIndex: log_entry.logIndex,
           from: log_entry.from,
+          asset: symbol,
           amountRaw: log_entry.amountRaw,
           blockNumber: BigInt(info.blockNumber),
+        }); // idempotent: duplicates are dropped by the unique index
+      }
+    }
+  }
+
+  // -- Native TRX ------------------------------------------------------
+  // Only for payments actually quoted in TRX, unlike the TRC-20 sweep above.
+  // Both cost one call per address, but a TRC-20 call covers a token the payer
+  // might plausibly have sent by mistake, whereas scanning a USDT payment's
+  // address for stray TRX would double this worker's TronGrid usage to record
+  // something that can never settle it.
+  if (net.native) {
+    const nativePayments = open.filter((p) => p.asset === net.native!.symbol);
+    for (const { address, createdAt } of nativePayments) {
+      const txs = await getNativeTransfers(net, address, createdAt);
+      log.debug("native transaction listing", {
+        "chain.address": address,
+        "transfer.listed": txs.length,
+        "payment.created_at": createdAt,
+      });
+
+      for (const tx of txs) {
+        const transfer = parseNativeTransfer(tx, address);
+        if (!transfer) continue; // outgoing, a contract call, failed, or unmined
+
+        // Same bound as the TRC-20 path: an address can carry history older than
+        // the payment, and those funds must never settle it.
+        if ((tx.block_timestamp ?? 0) < createdAt.getTime()) {
+          log.debug("native transfer skipped — predates the payment", {
+            "chain.tx_hash": tx.txID,
+            "transfer.block_timestamp": new Date(tx.block_timestamp ?? 0),
+            "payment.created_at": createdAt,
+          });
+          continue;
+        }
+
+        candidates++;
+        registered++;
+        count("chain.transfers.seen", { network, source: "trongrid_native" });
+        log.info("transfer seen", {
+          "transfer.source": "trongrid_native",
+          "token.symbol": net.native.symbol,
+          "transfer.to": address,
+          "transfer.from": transfer.from,
+          "transfer.amount_raw": transfer.amountRaw,
+          "chain.tx_hash": tx.txID,
+          "chain.block_number": transfer.blockNumber,
+        });
+
+        await registerDeposit({
+          network,
+          address,
+          txHash: tx.txID,
+          // No log to index: a TRX transfer is the transaction itself.
+          logIndex: -1,
+          from: transfer.from,
+          asset: net.native.symbol,
+          amountRaw: transfer.amountRaw,
+          blockNumber: transfer.blockNumber,
         }); // idempotent: duplicates are dropped by the unique index
       }
     }

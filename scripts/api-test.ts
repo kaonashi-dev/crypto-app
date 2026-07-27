@@ -98,8 +98,52 @@ async function main() {
   assert(String(co.qr_data_url).startsWith("data:image/png;base64,"), "QR data URL present");
   assert(co.decimals === 6, "decimals = 6 for USDC");
   assert(co.payment.amount_crypto_raw === "12500000", "checkout carries required amount");
+  assert(
+    co.payment_uri.includes("/transfer?address="),
+    "a token URI targets the contract and calls transfer"
+  );
   res = await app.request(`/public/payments/does-not-exist/checkout`);
   assert(res.status === 404, "unknown checkout -> 404");
+
+  // A native coin has no contract to call: EIP-681 addresses the payee directly
+  // and carries `value`. Sending the token form for a native payment would ask
+  // the wallet to call `transfer` on an account with no code.
+  console.log("\n[GET /public/payments/:id/checkout — native coin]");
+  const nativeIdx = await reserveDerivationIndex();
+  const [pn] = await db
+    .insert(schema.payments)
+    .values({
+      publicId: "apitest_" + randomBytes(5).toString("hex"),
+      clientId: client!.id,
+      amountCop: 50_000n,
+      asset: "BNB",
+      network: "bsc-testnet",
+      // 18-decimal native coin at 600,000 COP each.
+      amountCryptoRaw: copToRaw(50_000n, 600_000_000_000n, 18),
+      rateCopPerUnitE6: 600_000_000_000n,
+      address: deriveAddress(nativeIdx, "bsc-testnet"),
+      derivationIndex: nativeIdx,
+      quoteExpiresAt: new Date(Date.now() + 15 * 60_000),
+    })
+    .returning();
+
+  res = await app.request(`/public/payments/${pn!.publicId}/checkout`);
+  assert(res.status === 200, "native checkout payload -> 200");
+  const con = (await res.json()) as any;
+  assert(con.decimals === 18, "decimals = 18 for BNB");
+  assert(
+    con.payment_uri.startsWith(`ethereum:${pn!.address}@97`),
+    "native URI targets the payee on the chain id, not a contract"
+  );
+  assert(
+    con.payment_uri.includes(`?value=${pn!.amountCryptoRaw}`) &&
+      !con.payment_uri.includes("/transfer"),
+    "native URI carries value and never calls transfer"
+  );
+  assert(
+    con.payment.amount_crypto_raw === "83333333333333334",
+    "native amount serialized in full precision as a string"
+  );
 
   console.log("\n[GET /pay/:id serves the SPA]");
   res = await app.request(`/pay/${p!.publicId}`);

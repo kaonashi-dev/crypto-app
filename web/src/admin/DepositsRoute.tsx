@@ -132,7 +132,7 @@ export function DepositsRoute() {
                           kind="transaction"
                         />
                         <p class="mt-0.5 text-[0.68rem] text-ink-3">
-                          {d.network} · log {d.log_index}
+                          {d.network} · {d.log_index < 0 ? "native" : `log ${d.log_index}`}
                         </p>
                       </td>
                       <td class="max-w-[170px] px-4 py-3">
@@ -146,6 +146,11 @@ export function DepositsRoute() {
                       </td>
                       <td class="px-4 py-3 text-right font-mono text-[0.78rem] whitespace-nowrap text-ink tabular-nums">
                         {fmtUnits(d.amount_raw, d.decimals)} {d.asset}
+                        <Show when={!d.settles}>
+                          <p class="mt-0.5 font-sans text-[0.68rem] text-serious">
+                            not {d.payment_asset} — never credited
+                          </p>
+                        </Show>
                       </td>
                       <td class="px-4 py-3">
                         <Link

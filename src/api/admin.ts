@@ -19,7 +19,15 @@
 import { Hono } from "hono";
 import { and, count, desc, eq, ilike, inArray, or, sql, sum } from "drizzle-orm";
 import { db, schema } from "../db";
-import { NETWORKS, env, tokenFor, configSummary, missingCredential, type NetworkId } from "../config";
+import {
+  NETWORKS,
+  NETWORK_IDS,
+  env,
+  assetFor,
+  configSummary,
+  missingCredential,
+  type NetworkId,
+} from "../config";
 import { requiredWithTolerance } from "../services/payments";
 import { rateCacheState } from "../services/rates";
 import { activeSessionCounts } from "../services/admin-auth";
@@ -54,6 +62,13 @@ function networkMeta(id: string) {
     confirmations: Number(net.confirmations),
     explorer: net.explorer,
     chain_id: net.family === "evm" ? net.chain.id : null,
+    testnet: net.testnet,
+    tokens: Object.keys(net.tokens),
+    native: net.native?.symbol ?? null,
+    // A network can hold historical payments and still not be offered any more
+    // (a mainnet with ENABLE_MAINNETS unset), so the console distinguishes
+    // "gone" from "never existed".
+    offered: (NETWORK_IDS as readonly string[]).includes(id),
   };
 }
 
@@ -276,7 +291,7 @@ adminApi.get("/payments", async (c) => {
       pending_raw: s(p.pendingRaw),
       overpaid_raw: s(p.overpaidRaw),
       address: p.address,
-      decimals: tokenFor(p.network as NetworkId, p.asset)?.decimals ?? 6,
+      decimals: assetFor(p.network as NetworkId, p.asset)?.decimals ?? 6,
       quote_expires_at: p.quoteExpiresAt,
       grace_expires_at: p.graceExpiresAt,
       paid_at: p.paidAt,
@@ -318,7 +333,7 @@ adminApi.get("/payments/:publicId", async (c) => {
       .orderBy(desc(schema.ledgerEntries.createdAt)),
   ]);
 
-  const token = tokenFor(p.network as NetworkId, p.asset);
+  const token = assetFor(p.network as NetworkId, p.asset);
 
   return c.json({
     payment: {
@@ -354,7 +369,16 @@ adminApi.get("/payments/:publicId", async (c) => {
       webhook_url: client.webhookUrl,
       is_active: client.isActive,
     },
-    token: token ? { address: token.address, decimals: token.decimals, symbol: p.asset } : null,
+    // `address` is null for the chain's own coin: there is no contract to link
+    // to on the explorer, which is exactly what the console needs to know.
+    token: token
+      ? {
+          address: token.kind === "token" ? token.address : null,
+          decimals: token.decimals,
+          symbol: p.asset,
+          kind: token.kind,
+        }
+      : null,
     network: networkMeta(p.network),
     deposits: deposits.map((d) => ({
       id: d.id,
@@ -365,6 +389,11 @@ adminApi.get("/payments/:publicId", async (c) => {
       block_number: s(d.blockNumber),
       confirmed: d.confirmed,
       created_at: d.createdAt,
+      asset: d.asset,
+      // False for a deposit in an asset this payment did not quote: recorded,
+      // never credited, and needing a human.
+      settles: d.asset === p.asset,
+      decimals: assetFor(d.network as NetworkId, d.asset)?.decimals ?? token?.decimals ?? 6,
     })),
     webhooks: webhooks.map((w) => ({
       id: w.id,
@@ -468,10 +497,16 @@ adminApi.get("/diagnostics", (c) =>
     service: resource,
     process: processStats(),
     config: configSummary(),
-    networks: Object.keys(NETWORKS).map((id) => ({
-      ...networkMeta(id),
-      enabled: !missingCredential(id as NetworkId),
-    })),
+    networks: Object.keys(NETWORKS).map((id) => {
+      const meta = networkMeta(id)!;
+      return {
+        ...meta,
+        // Watchers run only for a network that is both offered and holds its
+        // credential; a withheld mainnet with a key set is still not running.
+        enabled: meta.offered && !missingCredential(id as NetworkId),
+        missing_credential: missingCredential(id as NetworkId),
+      };
+    }),
     logging: { ...loggingConfig(), otlp: otlpStatus() },
     rates: rateCacheState(),
     metrics: snapshot(),
@@ -519,7 +554,13 @@ adminApi.get("/deposits", async (c) => {
       createdAt: schema.deposits.createdAt,
       paymentPublicId: schema.payments.publicId,
       paymentStatus: schema.payments.status,
-      asset: schema.payments.asset,
+      // The deposit's own asset, not the payment's — with several assets per
+      // network they can differ, and when they do that is the single most
+      // important thing on the row (see the mismatch guard in
+      // services/payments.ts). The payment's is carried alongside so the
+      // console can show the contrast rather than just a symbol.
+      asset: schema.deposits.asset,
+      paymentAsset: schema.payments.asset,
     })
     .from(schema.deposits)
     .innerJoin(schema.payments, eq(schema.payments.id, schema.deposits.paymentId))
@@ -541,7 +582,9 @@ adminApi.get("/deposits", async (c) => {
       payment_id: d.paymentPublicId,
       payment_status: d.paymentStatus,
       asset: d.asset,
-      decimals: tokenFor(d.network as NetworkId, d.asset)?.decimals ?? 6,
+      payment_asset: d.paymentAsset,
+      settles: d.asset === d.paymentAsset,
+      decimals: assetFor(d.network as NetworkId, d.asset)?.decimals ?? 6,
     })),
   });
 });

@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { db, schema } from "../db";
-import { tokenFor, env, type NetworkId } from "../config";
+import { assetFor, env, type NetworkId } from "../config";
 import { getRateCopE6, copToRaw } from "./rates";
 import { reserveDerivationIndex, deriveAddress } from "./wallet";
 import { enqueueWebhook } from "./webhooks";
@@ -24,12 +24,12 @@ const log = getLogger("payments");
 export async function createPayment(input: {
   clientId: string;
   amountCop: bigint;
-  asset: string; // 'USDC' | 'USDT'
-  network: NetworkId; // 'eth-sepolia' | 'base-sepolia' | 'tron-nile'
+  asset: string; // a token ('USDC', 'USDT') or the chain's own coin ('BNB', 'POL', 'TRX')
+  network: NetworkId; // see NETWORKS in src/config.ts
   metadata?: unknown;
 }) {
   const done = log.time("payment created");
-  const token = tokenFor(input.network, input.asset);
+  const token = assetFor(input.network, input.asset);
   if (!token) {
     log.warn("payment rejected — unsupported asset/network combination", {
       "payment.asset": input.asset,
@@ -84,7 +84,8 @@ export async function createPayment(input: {
     "payment.amount_crypto_raw": amountCryptoRaw,
     "payment.rate_cop_per_unit_e6": rate,
     "token.decimals": token.decimals,
-    "token.address": token.address,
+    "token.kind": token.kind,
+    ...(token.kind === "token" ? { "token.address": token.address } : {}),
     "payment.address": address,
     "wallet.derivation_index": derivationIndex,
     "payment.quote_expires_at": payment.quoteExpiresAt,
@@ -105,8 +106,11 @@ export async function registerDeposit(input: {
   network: NetworkId;
   address: string;
   txHash: string;
+  /** Log position, or -1 for a native coin transfer (see the deposits schema). */
   logIndex: number;
   from: string;
+  /** The symbol that actually arrived — not the one the payment asked for. */
+  asset: string;
   amountRaw: bigint;
   blockNumber: bigint;
 }) {
@@ -119,6 +123,7 @@ export async function registerDeposit(input: {
     "chain.block_number": input.blockNumber,
     "deposit.address": input.address,
     "deposit.from": input.from,
+    "deposit.asset": input.asset,
     "deposit.amount_raw": input.amountRaw,
   };
   addContextAttributes({ "chain.tx_hash": input.txHash });
@@ -155,6 +160,7 @@ export async function registerDeposit(input: {
         txHash: input.txHash,
         logIndex: input.logIndex,
         fromAddress: input.from,
+        asset: input.asset,
         amountRaw: input.amountRaw,
         blockNumber: input.blockNumber,
       })
@@ -178,8 +184,26 @@ export async function registerDeposit(input: {
       "deposit.id": inserted[0].id,
       "payment.id": payment.publicId,
       "payment.status": payment.status,
+      "payment.asset": payment.asset,
       "payment.amount_crypto_raw": payment.amountCryptoRaw,
     });
+
+    // A network carries several assets, and one address accepts all of them: a
+    // payer who picks the wrong token in their wallet sends real value to a real
+    // address of ours, and it must not be counted as the asset that was quoted.
+    // Crediting it would settle the payment against a completely different
+    // price. Recorded, never applied — reconciling it is a human's job.
+    if (input.asset !== payment.asset) {
+      count("deposits.ignored", { reason: "asset_mismatch" });
+      log.error("deposit does not settle — wrong asset for this payment", {
+        ...deposit,
+        "deposit.id": inserted[0].id,
+        "payment.id": payment.publicId,
+        "payment.asset": payment.asset,
+        hint: "funds are at the payment address in an asset it did not quote",
+      });
+      return;
+    }
 
     if (terminal) {
       // Recorded for reconciliation, but it can no longer move the payment.
@@ -282,6 +306,24 @@ export async function confirmDeposit(depositId: string) {
       .update(schema.deposits)
       .set({ confirmed: true })
       .where(eq(schema.deposits.id, dep.id));
+
+    // The counterpart of the mismatch guard in registerDeposit. That one keeps
+    // the amount out of `pendingRaw`; this one keeps it out of `confirmedRaw`,
+    // which is what actually settles a payment. Marked confirmed above so the
+    // confirmer stops re-reading it, then dropped: the transfer is real and on
+    // chain, it just is not this payment's asset.
+    if (dep.asset !== payment.asset) {
+      count("deposits.ignored", { reason: "asset_mismatch" });
+      log.error("confirmation skipped — deposit is in a different asset", {
+        "deposit.id": dep.id,
+        "chain.tx_hash": dep.txHash,
+        "deposit.asset": dep.asset,
+        "deposit.amount_raw": dep.amountRaw,
+        "payment.id": payment.publicId,
+        "payment.asset": payment.asset,
+      });
+      return;
+    }
 
     const confirmedRaw = payment.confirmedRaw + dep.amountRaw;
     const pendingRaw = payment.pendingRaw - dep.amountRaw;
