@@ -7,11 +7,16 @@ import { Empty, Panel } from "./ui";
 /**
  * Who can open this console.
  *
- * Read-only, like every other view here: accounts are created by the server at
- * boot from `ADMIN_USER`/`ADMIN_PASSWORD`, not through the console. Creating and
- * disabling operators from a browser is a mutation, and mutations on this
- * surface wait for the audit model the README lists as pending — a console that
- * can grant access is a console whose own access has to be logged.
+ * Read-only, unlike Merchants and Build: accounts are still created by the server
+ * at boot from `ADMIN_USER`/`ADMIN_PASSWORD`, not through the console.
+ *
+ * The reason is no longer that no audit model exists — `admin_audit_log` and the
+ * `requireOperator` guard were built for the merchant write surface, and operator
+ * CRUD could sit behind exactly the same two. It is that granting console access
+ * is a larger decision than provisioning a merchant: it needs a role model to say
+ * who may grant it, which nothing here has yet. Until then the environment stays
+ * the only way in, which is also what keeps `ADMIN_PASSWORD` a reliable recovery
+ * path for a deployment nobody can sign in to.
  */
 function Tag(props: { children: string; tone?: string }) {
   return (
@@ -152,7 +157,9 @@ export function UsersRoute() {
                 <span class="font-mono text-ink-2">samuel</span>) with the password in{" "}
                 <span class="font-mono text-ink-2">ADMIN_PASSWORD</span>, which is also how a
                 password is reset — change it and restart, and that operator's open sessions are
-                revoked. The console itself grants nothing.
+                revoked. The console itself grants nothing: it can create merchants, but not
+                operators, because deciding who may open this console needs a role model that
+                does not exist yet.
                 <Show when={data().signed_in_as === null}>
                   {" "}
                   This server is running <span class="text-warn">open</span> — no{" "}

@@ -12,6 +12,7 @@ import {
   setNow,
 } from "./console";
 import { fetchSession, logout, sessionExpired, setSessionExpired } from "./auth";
+import { forgetAllApiKeys } from "./credentials";
 import { LoginScreen } from "./LoginScreen";
 
 function NavLink(props: { to: string; active: boolean; children: JSX.Element }) {
@@ -35,9 +36,16 @@ export function AdminLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const fetching = useIsFetching();
 
+  // Payments is the index route, so it is "everything else" — which means every
+  // view added here has to be named in this list or it will render with the
+  // Payments tab highlighted.
   const onDeposits = () => pathname().startsWith("/admin/deposits");
+  const onSweeps = () => pathname().startsWith("/admin/sweeps");
   const onUsers = () => pathname().startsWith("/admin/users");
-  const onPayments = () => !onDeposits() && !onUsers();
+  const onMerchants = () => pathname().startsWith("/admin/merchants");
+  const onBuild = () => pathname().startsWith("/admin/build");
+  const onPayments = () =>
+    !onDeposits() && !onSweeps() && !onUsers() && !onMerchants() && !onBuild();
 
   /**
    * Who is signed in — and therefore whether any of the console renders at all.
@@ -69,8 +77,10 @@ export function AdminLayout() {
   const signOut = async () => {
     await logout();
     // The cache holds cross-merchant data; a signed-out browser should not still
-    // be carrying it.
+    // be carrying it. Nor should it still hold a merchant API key the Build view
+    // was given — that is a live credential, not a preference.
     queryClient.clear();
+    forgetAllApiKeys();
   };
 
   // The relative timestamps in every table need a clock of their own. It ticks
@@ -130,6 +140,15 @@ export function AdminLayout() {
               </NavLink>
               <NavLink to="/admin/deposits" active={onDeposits()}>
                 Deposits
+              </NavLink>
+              <NavLink to="/admin/sweeps" active={onSweeps()}>
+                Sweeps
+              </NavLink>
+              <NavLink to="/admin/merchants" active={onMerchants()}>
+                Merchants
+              </NavLink>
+              <NavLink to="/admin/build" active={onBuild()}>
+                Build
               </NavLink>
               <NavLink to="/admin/users" active={onUsers()}>
                 Operators
@@ -227,17 +246,19 @@ export function AdminLayout() {
           when={operator()}
           fallback={
             <>
-              Read-only internal console — <span class="text-warn">no authentication</span>. Set
-              ADMIN_PASSWORD to require a sign-in; until then, do not expose this port outside
-              your machine.
+              Internal console — <span class="text-warn">no authentication</span>. Reads are open;
+              Merchants and Build are refused, because a change nobody can be attributed for is
+              not recorded. Set ADMIN_PASSWORD to require a sign-in; until then, do not expose
+              this port outside your machine.
             </>
           }
         >
           {(who) => (
             <>
-              Read-only internal console, signed in as{" "}
+              Internal console, signed in as{" "}
               <span class="font-mono text-ink-2">{who().username}</span>. Cross-merchant: every
-              payment here belongs to someone.
+              payment here belongs to someone. Every change you make is recorded against your
+              name.
             </>
           )}
         </Show>

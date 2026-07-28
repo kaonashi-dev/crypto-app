@@ -30,14 +30,70 @@ export type Stats = {
   deposits: { total: number; unconfirmed: number };
   webhooks: { pending: number; delivered: number; dead: number };
   clients: number;
+  sweeps: {
+    by_status: Record<SweepStatus, number>;
+    unswept: UnsweptRow[];
+  };
   config: {
     quote_ttl_min: number;
     grace_ttl_min: number;
     spread_bps: number;
     dust_bps: number;
+    sweep_enabled: boolean;
+    sweep_dry_run: boolean;
+    sweep_min_usd: number;
+    sweep_max_cost_bps: number;
+    /** `network/ASSET:mechanism` for every pairing this build can consolidate. */
+    sweep_pairings: string[];
   };
   networks: NetworkMeta[];
   statuses: PaymentStatus[];
+};
+
+export type SweepStatus =
+  | "planned"
+  | "authorized"
+  | "broadcast"
+  | "confirmed"
+  | "failed"
+  | "skipped";
+
+/** Confirmed in minus confirmed out, per (network, asset). */
+export type UnsweptRow = {
+  network: string;
+  asset: string;
+  decimals: number;
+  confirmed_raw: string;
+  swept_raw: string;
+  unswept_raw: string;
+};
+
+export type SweepRow = {
+  id: string;
+  network: string;
+  address: string;
+  derivation_index: number;
+  asset: string;
+  amount_raw: string;
+  decimals: number;
+  to_address: string;
+  via: string;
+  status: SweepStatus;
+  /** Why a row is skipped or failed: 'below_floor', 'fee_too_high', … */
+  reason: string | null;
+  tx_hash: string | null;
+  block_number: string | null;
+  /** In the network's fee currency, which is not always an asset we quote. */
+  fee_raw: string | null;
+  fee_asset: string;
+  fee_decimals: number;
+  attempts: number;
+  next_attempt_at: string;
+  last_error: string | null;
+  authorization_nonce: string | null;
+  valid_before: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ClientRow = {
@@ -166,6 +222,84 @@ export type PaymentFilters = {
   q?: string;
 };
 
+// -- Write surface (mirrors src/api/admin-write.ts) ---------------------
+
+/** One recorded mutation. `detail` was secret-scrubbed server-side. */
+export type AuditEntry = {
+  id: string;
+  operator_id: string | null;
+  operator_username: string;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  outcome: string;
+  detail: unknown;
+  ip_address: string | null;
+  user_agent: string | null;
+  /** Searchable in the log tail — expands this row into its whole request. */
+  trace_id: string | null;
+  created_at: string;
+};
+
+export type MerchantDetail = {
+  client: ClientRow & { api_key_hash_prefix: string };
+  payments: { total: number; by_status: Record<PaymentStatus, number> };
+  ledger: { entries: number; credited_cop: string };
+  webhooks: { total: number; pending: number; dead: number };
+  references: { payments: number; ledger_entries: number; webhook_jobs: number };
+  /** False when a hard delete would orphan settlement history. */
+  deletable: boolean;
+  audit: AuditEntry[];
+};
+
+/**
+ * A response that carries a credential.
+ *
+ * Both fields are present exactly once, on the call that generated them, and are
+ * never served again by any read — so whatever the console does with them here is
+ * the only chance it gets.
+ */
+export type MerchantCreated = {
+  client: ClientRow & { api_key_hash_prefix: string };
+  api_key: string;
+  webhook_secret: string;
+};
+
+export type PaymentCreated = {
+  id: string;
+  status: PaymentStatus;
+  amount_cop: string;
+  asset: string;
+  network: string;
+  amount_crypto_raw: string;
+  confirmed_raw: string;
+  overpaid_raw: string;
+  address: string;
+  quote_expires_at: string;
+  grace_expires_at: string | null;
+  paid_at: string | null;
+  metadata: unknown;
+  checkout_url: string;
+};
+
+/** The body of GET /api/payments/:publicId/status. */
+export type PaymentStatusView = {
+  id: string;
+  status: PaymentStatus;
+  terminal: boolean;
+  asset: string;
+  network: string;
+  decimals: number | null;
+  amount_cop: string;
+  amount_crypto_raw: string;
+  confirmed_raw: string;
+  pending_raw: string;
+  overpaid_raw: string;
+  quote_expires_at: string;
+  grace_expires_at: string | null;
+  paid_at: string | null;
+};
+
 // -- Fetchers ----------------------------------------------------------
 
 /**
@@ -217,6 +351,198 @@ export function fetchDeposits(filters: { network?: string; confirmed?: string; q
   for (const [k, v] of Object.entries(filters)) if (v) qs.set(k, v);
   return get<{ deposits: DepositRow[] }>(`/deposits?${qs}`);
 }
+
+export type AssetBalance = {
+  asset: string;
+  raw: string;
+  decimals: number;
+  kind: "token" | "native";
+  /** True for the coin this chain charges fees in — what a relayer must hold. */
+  is_fee_currency: boolean;
+};
+
+export type WalletInfo = {
+  role: "treasury" | "relayer";
+  address: string | null;
+  balances: AssetBalance[];
+  /** Why there is nothing to report, when there is nothing to report. */
+  note: string | null;
+};
+
+export type NetworkWallets = {
+  network: string;
+  family: "evm" | "tron";
+  testnet: boolean;
+  /** False when the RPC did not answer: balances are unknown, not zero. */
+  reachable: boolean;
+  error: string | null;
+  wallets: WalletInfo[];
+};
+
+export type WalletsResponse = {
+  networks: NetworkWallets[];
+  age_s: number;
+  cache_ttl_s: number;
+  sweep: { enabled: boolean; dry_run: boolean; signer: string; pairings: string[] };
+};
+
+export const fetchWallets = () => get<WalletsResponse>("/wallets");
+
+export function fetchSweeps(filters: { network?: string; status?: string; q?: string }) {
+  const qs = new URLSearchParams({ limit: "100" });
+  for (const [k, v] of Object.entries(filters)) if (v) qs.set(k, v);
+  return get<{ total: number; limit: number; statuses: SweepStatus[]; sweeps: SweepRow[] }>(
+    `/sweeps?${qs}`
+  );
+}
+
+export const fetchMerchant = (id: string) => get<MerchantDetail>(`/clients/${id}`);
+
+export function fetchAudit(filters: { action?: string; target_id?: string } = {}) {
+  const qs = new URLSearchParams({ limit: "100" });
+  for (const [k, v] of Object.entries(filters)) if (v) qs.set(k, v);
+  return get<{ total: number; actions: string[]; entries: AuditEntry[] }>(`/audit?${qs}`);
+}
+
+// -- Mutations ---------------------------------------------------------
+
+/**
+ * Raised by every console mutation, carrying enough to explain itself.
+ *
+ * A write can fail for reasons a read never does — a refused webhook URL, a
+ * merchant that still has payments pointing at it, an open console that may not
+ * mutate at all — and each of those answers is a body the operator needs to see
+ * rather than a generic "request failed".
+ */
+export class ConsoleError extends Error {
+  constructor(
+    readonly status: number,
+    readonly body: any,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
+async function write<T>(path: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/admin/api${path}`, {
+    method,
+    // The guard in src/api/admin-auth.ts requires this on any request with a
+    // body: it is the half of the CSRF defence that does not rest on the
+    // browser honouring SameSite.
+    ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" } }),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    noteUnauthorized(res);
+    const detail =
+      typeof payload?.details === "string"
+        ? payload.details
+        : (payload?.error ?? `${method} ${path} -> ${res.status}`);
+    throw new ConsoleError(res.status, payload, detail);
+  }
+  return payload as T;
+}
+
+export const createMerchant = (body: { name: string; webhook_url: string | null }) =>
+  write<MerchantCreated>("/clients", "POST", body);
+
+export const updateMerchant = (
+  id: string,
+  body: { name?: string; webhook_url?: string | null; is_active?: boolean }
+) => write<{ client: ClientRow }>(`/clients/${id}`, "PATCH", body);
+
+export const rotateApiKey = (id: string) =>
+  write<{ client: ClientRow; api_key: string }>(`/clients/${id}/api-key`, "POST", {});
+
+export const rotateWebhookSecret = (id: string) =>
+  write<{ client: ClientRow; webhook_secret: string }>(
+    `/clients/${id}/webhook-secret`,
+    "POST",
+    {}
+  );
+
+/** Soft by default; `hard` deletes the row and is refused when anything points at it. */
+export const deleteMerchant = (id: string, hard = false) =>
+  write<{ client?: ClientRow; deleted: boolean }>(
+    `/clients/${id}${hard ? "?hard=true" : ""}`,
+    "DELETE"
+  );
+
+// -- The request builder's two modes -----------------------------------
+
+export type PaymentRequestBody = {
+  amount_cop: string;
+  asset: string;
+  network: string;
+  metadata?: unknown;
+};
+
+/**
+ * What came back, whatever it was.
+ *
+ * The Build view renders the real response — status line, trace id and body —
+ * including when it is a 400, because showing an integrator the actual rejection
+ * is most of what makes the view worth having. So this never throws: a failure is
+ * a result here, not an exception.
+ */
+export type RawResponse = {
+  status: number;
+  ok: boolean;
+  trace_id: string | null;
+  body: unknown;
+  /** The request as it was actually sent, for the transcript. */
+  sent: { method: string; url: string; headers: Record<string, string>; body?: string };
+};
+
+async function raw(
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body?: unknown
+): Promise<RawResponse> {
+  const serialized = body === undefined ? undefined : JSON.stringify(body);
+  const res = await fetch(url, { method, headers, body: serialized });
+  const parsed = await res.json().catch(() => null);
+  if (res.status === 401 && url.startsWith("/admin/")) noteUnauthorized(res);
+
+  return {
+    status: res.status,
+    ok: res.ok,
+    // Minted per request by the middleware in src/api/routes.ts; the handle to
+    // search the log tail with when something went wrong.
+    trace_id: res.headers.get("x-trace-id"),
+    body: parsed,
+    sent: { method, url, headers, body: serialized },
+  };
+}
+
+/** The documented merchant integration path, exercised for real, with a real key. */
+export const createPaymentAsMerchant = (apiKey: string, body: PaymentRequestBody) =>
+  raw("POST", "/api/payments", {
+    "Content-Type": "application/json",
+    "X-Api-Key": apiKey,
+  }, body);
+
+/** The console's own path, for a merchant whose key is not recoverable. */
+export const createPaymentAsOperator = (clientId: string, body: PaymentRequestBody) =>
+  raw("POST", "/admin/api/payments", { "Content-Type": "application/json" }, {
+    ...body,
+    client_id: clientId,
+  });
+
+export const fetchStatusAsMerchant = (apiKey: string, publicId: string) =>
+  raw("GET", `/api/payments/${publicId}/status`, { "X-Api-Key": apiKey });
+
+/**
+ * The operator's equivalent. There is no `/admin/api/.../status` — the console
+ * already has a richer read of the same row, so adding one would be a second way
+ * to ask the same question.
+ */
+export const fetchStatusAsOperator = (publicId: string) =>
+  raw("GET", `/admin/api/payments/${publicId}`, {});
 
 // -- Formatting --------------------------------------------------------
 
