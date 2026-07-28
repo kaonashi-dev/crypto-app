@@ -5,6 +5,8 @@ import { startNativeWatcher } from "./native-watcher";
 import { startConfirmer } from "./confirmer";
 import { startTronWatcher } from "./tron-watcher";
 import { startTronConfirmer } from "./tron-confirmer";
+import { startSweeper } from "./sweeper";
+import { startSweepRecon } from "./sweep-recon";
 import { getNowBlock } from "../services/tron";
 import { logRpcError } from "./rpc-log";
 import { getLogger, withContext, count, gauge, observe } from "../observability";
@@ -25,6 +27,8 @@ function driver(network: NetworkId) {
       start: () => {
         startTronWatcher(network);
         startTronConfirmer(network);
+        startSweeper(network);
+        startSweepRecon(network);
       },
     };
   }
@@ -39,6 +43,11 @@ function driver(network: NetworkId) {
       // its native coin.
       if (net.native) startNativeWatcher(network);
       startConfirmer(network);
+      // Both are no-ops unless switched on, and both sit behind the same RPC
+      // probe as the watchers above — a sweep must not be attempted against a
+      // network that is not answering.
+      startSweeper(network);
+      startSweepRecon(network);
     },
   };
 }

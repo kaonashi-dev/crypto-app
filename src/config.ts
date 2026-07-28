@@ -68,6 +68,72 @@ export const env = {
   // cross-merchant view of every payment, and an unattended browser should stop
   // being one by the end of the working day.
   adminSessionTtlHours: Number(Bun.env.ADMIN_SESSION_TTL_HOURS ?? 12),
+
+  // -- Sweeping (docs/SWEEPING-PLAN.md) --------------------------------
+  //
+  // Consolidating per-payment deposit addresses into one treasury. Off by
+  // default, and the two switches are not the same switch:
+  //
+  //   SWEEP_ENABLED=false            the worker never starts. Nothing is
+  //                                  planned, signed or written. This is today's
+  //                                  behaviour — funds accumulate at the leaves.
+  //   SWEEP_ENABLED + SWEEP_DRY_RUN  candidates are selected and recorded as
+  //                                  `planned` rows with their reasons. Nothing
+  //                                  is ever signed. Safe anywhere.
+  //   SWEEP_ENABLED only             full execution: authorize, broadcast,
+  //                                  confirm.
+  //
+  // Sweeping cannot corrupt settlement in any of these modes — settlement is
+  // event-sourced from Transfer logs and never reads a balance — but dry-run is
+  // how that gets demonstrated before the first signature.
+  sweepEnabled: /^(1|true|yes)$/i.test(Bun.env.SWEEP_ENABLED ?? ""),
+  sweepDryRun: !/^(0|false|no)$/i.test(Bun.env.SWEEP_DRY_RUN ?? "true"),
+  sweepIntervalSec: Number(Bun.env.SWEEP_INTERVAL_SEC ?? 120),
+  // Floor, in USD, below which value is left to accumulate. Converted per
+  // (network, asset) through the same rate service that prices a quote, because
+  // the floor is about value and the column is about raw units.
+  sweepMinUsd: Number(Bun.env.SWEEP_MIN_USD ?? 5),
+  // Refuse a sweep whose estimated fee exceeds this share of what it moves.
+  // The load-bearing economic test: 200 bps = 2%.
+  sweepMaxCostBps: BigInt(Bun.env.SWEEP_MAX_COST_BPS ?? 200),
+  // Global override of the per-network `sweepGasCeilingGwei` in the registry.
+  // Unset = each network keeps its own figure.
+  sweepGasCeilingGwei: Bun.env.SWEEP_GAS_CEILING_GWEI
+    ? Number(Bun.env.SWEEP_GAS_CEILING_GWEI)
+    : null,
+  // Matches the webhook dead-letter convention (see /admin/api/stats).
+  sweepMaxAttempts: Number(Bun.env.SWEEP_MAX_ATTEMPTS ?? 8),
+  // Headroom on a native sweep, which is inherently racy: the fee is subtracted
+  // from the very balance being moved, and the gas price can rise between the
+  // estimate and inclusion. A small residue left behind is normal, not an error.
+  sweepNativeHeadroomBps: BigInt(Bun.env.SWEEP_NATIVE_HEADROOM_BPS ?? 500),
+  // How long a signed EIP-3009 authorization stays valid. Long by design: a
+  // crash-recovery rebroadcast re-signs the *stored* nonce and must still be
+  // accepted, and an authorization that expired mid-flight would force a new
+  // nonce and a second on-chain attempt. Persisting one is safe — its only
+  // possible effect is moving funds to the treasury.
+  sweepAuthTtlSec: Number(Bun.env.SWEEP_AUTH_TTL_SEC ?? 86_400),
+  // Reconciliation (§9): on-chain balance vs the ledger, per address. Read-only
+  // and independently useful — it is what surfaces value that arrived on a chain
+  // no watcher covers — so it can run with the sweeper itself switched off.
+  sweepReconEnabled: /^(1|true|yes)$/i.test(Bun.env.SWEEP_RECON_ENABLED ?? ""),
+  sweepReconIntervalSec: Number(Bun.env.SWEEP_RECON_INTERVAL_SEC ?? 3600),
+  // Addresses examined per reconciliation tick. EVM networks batch them through
+  // multicall3 (one call per network), Tron costs one call per address, so this
+  // bounds the metered cost. A cursor rotates through the rest on later ticks;
+  // what a tick did not reach is logged rather than silently dropped.
+  sweepReconMaxAddresses: Number(Bun.env.SWEEP_RECON_MAX_ADDRESSES ?? 200),
+  // Where swept value lands. One per family, snapshotted onto every sweep row at
+  // plan time so a later change cannot rewrite history. The gateway never holds
+  // a key for these — they are destinations, never sources.
+  treasuryEvm: (Bun.env.TREASURY_ADDRESS_EVM ?? "").trim() || null,
+  treasuryTron: (Bun.env.TREASURY_ADDRESS_TRON ?? "").trim() || null,
+  // Which `Signer` implementation holds the deposit keys (§5, §10). `local`
+  // derives them in-process from HD_MNEMONIC, which is appropriate for a testnet
+  // and unacceptable for real value: it gives an always-on process the ability
+  // to sign movements of money. `remote` is the KMS/HSM/MPC seam, and the
+  // preflight below is what makes the distinction binding rather than advisory.
+  sweepSigner: (Bun.env.SWEEP_SIGNER ?? "local").trim().toLowerCase(),
 };
 
 /**
@@ -160,6 +226,8 @@ export function preflight(): void {
     });
   }
 
+  preflightSweeping(mainnets);
+
   for (const network of NETWORK_IDS) {
     const key = missingCredential(network);
     if (key) {
@@ -171,6 +239,76 @@ export function preflight(): void {
   }
 
   log.info("configuration validated", configSummary());
+}
+
+/**
+ * Base58Check is not decoded here — the codec lives with the Tron client, and
+ * importing it would make this module depend on a service. A typo'd address is
+ * what this catches; `treasuryFor()` in services/sweeper.ts re-checks the
+ * checksum before a single sweep is planned, so a value that passes here and
+ * fails there disables that family rather than sending anywhere.
+ */
+const TRON_ADDRESS_SHAPE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
+const EVM_ADDRESS_SHAPE = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * The sweeping half of the preflight (docs/SWEEPING-PLAN.md §7.1, §10).
+ *
+ * Two things are enforced, and only when sweeping is actually switched on:
+ *
+ * 1. A served family has somewhere to sweep *to*. Planning a sweep with no
+ *    treasury address would write ledger rows pointing nowhere.
+ * 2. Real value is never signed for by an in-process key. This reuses the
+ *    mechanism directly above — a build that serves a mainnet is already the
+ *    thing that arms the public-seed check — so the custody boundary in §10 is
+ *    enforced by construction rather than by policy. Dry-run is exempt: it
+ *    plans and logs, and never reaches a signature.
+ */
+function preflightSweeping(mainnets: NetworkId[]): void {
+  if (!env.sweepEnabled) return;
+
+  const families = new Set(NETWORK_IDS.map((id) => NETWORKS[id].family));
+  const treasuries: Array<{ name: string; value: string | null; shape: RegExp }> = [
+    ...(families.has("evm")
+      ? [{ name: "TREASURY_ADDRESS_EVM", value: env.treasuryEvm, shape: EVM_ADDRESS_SHAPE }]
+      : []),
+    ...(families.has("tron")
+      ? [{ name: "TREASURY_ADDRESS_TRON", value: env.treasuryTron, shape: TRON_ADDRESS_SHAPE }]
+      : []),
+  ];
+
+  const bad = treasuries
+    .filter((t) => !t.value || !t.shape.test(t.value))
+    .map((t) => (t.value ? `${t.name} (malformed)` : `${t.name} (unset)`));
+
+  if (bad.length) {
+    log.fatal("SWEEP_ENABLED is set but the treasury is not usable — refusing to start", {
+      "sweep.treasury_problems": bad,
+      "config.families_served": [...families],
+      hint: "set a treasury address per served family, or unset SWEEP_ENABLED",
+    });
+    process.exit(1);
+  }
+
+  if (!env.sweepDryRun && env.sweepSigner === "local" && mainnets.length) {
+    log.fatal(
+      "SWEEP_ENABLED with a served mainnet and an in-process signer — refusing to start",
+      {
+        "sweep.signer": env.sweepSigner,
+        "config.mainnet_networks": mainnets,
+        hint:
+          "an always-on process may not hold keys that move real value: set " +
+          "SWEEP_SIGNER=remote, or keep SWEEP_DRY_RUN on, or unset ENABLE_MAINNETS",
+      }
+    );
+    process.exit(1);
+  }
+
+  if (env.sweepDryRun) {
+    log.info("sweeper is in dry run — candidates are planned and recorded, never signed", {
+      "sweep.dry_run": true,
+    });
+  }
 }
 
 /**
@@ -211,13 +349,91 @@ export function configSummary() {
     // ask of an address that behaves strangely.
     "wallet.mnemonic_is_public": Boolean(publicMnemonicSource()),
     "config.production": env.isProduction,
+    // Sweeping. The treasury addresses themselves are not secret, but they are
+    // omitted here in favour of the pairings that can actually move: "which
+    // (network, asset) will this build consolidate" is the operational question,
+    // and it is answered by the registry rather than by the environment.
+    "sweep.enabled": env.sweepEnabled,
+    "sweep.dry_run": env.sweepDryRun,
+    "sweep.signer": env.sweepSigner,
+    "sweep.interval_s": env.sweepIntervalSec,
+    "sweep.min_usd": env.sweepMinUsd,
+    "sweep.max_cost_bps": Number(env.sweepMaxCostBps),
+    "sweep.native_headroom_bps": Number(env.sweepNativeHeadroomBps),
+    "sweep.max_attempts": env.sweepMaxAttempts,
+    "sweep.auth_ttl_s": env.sweepAuthTtlSec,
+    "sweep.gas_ceiling_gwei": env.sweepGasCeilingGwei,
+    "sweep.recon_enabled": env.sweepReconEnabled,
+    "sweep.recon_interval_s": env.sweepReconIntervalSec,
+    "sweep.treasury_evm_set": Boolean(env.treasuryEvm),
+    "sweep.treasury_tron_set": Boolean(env.treasuryTron),
+    "sweep.pairings": sweepablePairings(),
   };
 }
 
+/**
+ * Every (network, asset) this build is able to consolidate, as
+ * `network/ASSET:mechanism`.
+ *
+ * The answer to "why has nothing swept" is almost always that a pairing has no
+ * mechanism in the registry, so it is reported next to the switches rather than
+ * left to be inferred from them.
+ */
+export function sweepablePairings(): string[] {
+  return NETWORK_IDS.flatMap((id) => {
+    const net = NETWORKS[id];
+    const assets = [...Object.keys(net.tokens), ...(net.native ? [net.native.symbol] : [])];
+    return assets.flatMap((asset) => {
+      const how = sweepFor(id, asset);
+      return how ? [`${id}/${asset}:${how.via}`] : [];
+    });
+  });
+}
+
+/**
+ * How value leaves a deposit address — see §4 of docs/SWEEPING-PLAN.md.
+ *
+ * A deposit address is an EOA holding only a token, and moving an ERC-20 out of
+ * one normally needs native gas *at that address*. Which escape hatch applies is
+ * a property of the contract, so it is declared here beside the contract rather
+ * than kept as a lookup table inside the sweeper: adding a network cannot then
+ * silently inherit another network's assumption, and "what can we consolidate"
+ * is answered by reading the registry.
+ *
+ *  - `eip3009`  the holder signs an authorization off-chain and a relayer pays
+ *               the gas. One transaction, nothing needed at the leaf.
+ *  - `prefund`  no authorization scheme: send gas, then transfer. Two
+ *               transactions, and leftover gas dust stays at the address.
+ *  - `delegate` Tron. Energy is delegated to the address, spent, and reclaimed;
+ *               the staked TRX is lent rather than consumed.
+ *  - `native`   the chain's own coin, where the value *is* the gas.
+ *
+ * The EIP-712 domain is optional and normally absent: it is read from the
+ * contract and cross-checked against `DOMAIN_SEPARATOR()` at runtime, because a
+ * wrong domain produces a signature that fails on-chain after a ledger row has
+ * already been written. Set it only to pin a deployment whose `name()`/
+ * `version()` cannot be trusted. `scripts/sweep-probe.ts` reports both.
+ */
+export type SweepVia =
+  | { via: "eip3009"; domain?: { name: string; version: string } }
+  | { via: "prefund" }
+  | { via: "delegate" }
+  | { via: "native" };
+
 /** EVM token: 0x-hex contract. */
-export type EvmTokenDef = { address: `0x${string}`; decimals: number };
+export type EvmTokenDef = {
+  address: `0x${string}`;
+  decimals: number;
+  /** How value leaves a deposit address. Absent = never swept. */
+  sweep?: SweepVia;
+};
 /** Tron token: Base58Check ("T...") contract. */
-export type TronTokenDef = { address: string; decimals: number };
+export type TronTokenDef = {
+  address: string;
+  decimals: number;
+  /** How value leaves a deposit address. Absent = never swept. */
+  sweep?: SweepVia;
+};
 
 /**
  * The chain's own coin (BNB, POL, TRX) — the one asset with no contract behind
@@ -230,7 +446,16 @@ export type TronTokenDef = { address: string; decimals: number };
  * watchers are separate for that reason, and this is the flag that decides
  * whether the second one runs at all.
  */
-export type NativeAssetDef = { symbol: string; decimals: number };
+export type NativeAssetDef = {
+  symbol: string;
+  decimals: number;
+  /**
+   * How value leaves a deposit address. Always `native` where it is set: the
+   * coin pays its own gas, so the sweep is `balance − fee` and needs no contract
+   * capability at all. Absent = never swept.
+   */
+  sweep?: SweepVia;
+};
 
 /**
  * Block-explorer URL templates, `{v}` substituted with the hash/address.
@@ -267,6 +492,21 @@ export type EvmNetworkDef = NetworkRealm & {
   tokens: Record<string, EvmTokenDef>;
   /** The chain's own coin, or null when this gateway does not accept it. */
   native: NativeAssetDef | null;
+  /**
+   * Above this gas price the sweeper defers rather than executes (§7). A hard
+   * ceiling on top of the value-relative `SWEEP_MAX_COST_BPS` test, because a
+   * large enough balance would otherwise justify paying a spike.
+   *
+   * Per network and therefore in the registry, not the environment: what counts
+   * as expensive is a property of the chain. `SWEEP_GAS_CEILING_GWEI` overrides
+   * every network at once when one is set.
+   *
+   * Note this is the *fee* currency, which is not always an asset the gateway
+   * accepts — Sepolia and Base quote stablecoins and never ETH, but ETH is still
+   * what a sweep there costs. Read it from `chain.nativeCurrency`, never from
+   * `native`.
+   */
+  sweepGasCeilingGwei?: number;
 };
 
 /**
@@ -302,10 +542,20 @@ export const NETWORKS = {
       address: "https://sepolia.etherscan.io/address/{v}",
     },
     tokens: {
-      USDC: { address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", decimals: 6 },
+      // Circle FiatToken. `scripts/sweep-probe.ts` confirms EIP-3009 on-chain
+      // (authorizationState answers) and verifies the EIP-712 domain
+      // name="USDC" version="2" against the contract's DOMAIN_SEPARATOR().
+      // The domain is left unpinned so the sweeper re-derives and re-checks it
+      // at runtime rather than trusting a value copied into this file.
+      USDC: {
+        address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+        decimals: 6,
+        sweep: { via: "eip3009" },
+      },
     },
     // Sepolia ETH is not accepted: this gateway quotes stablecoins here.
     native: null,
+    sweepGasCeilingGwei: 50,
   },
   "base-sepolia": {
     family: "evm",
@@ -320,9 +570,16 @@ export const NETWORKS = {
       address: "https://sepolia.basescan.org/address/{v}",
     },
     tokens: {
+      // Also a Circle FiatToken and so almost certainly EIP-3009 — but `sweep`
+      // is deliberately absent because the probe could not reach this network
+      // to confirm it (the Alchemy app has Base Sepolia switched off). An
+      // unverified capability is exactly what §4.2 of the sweeping plan refuses
+      // to act on, so this pairing is simply never swept until
+      // `bun run scripts/sweep-probe.ts --network base-sepolia` says otherwise.
       USDC: { address: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", decimals: 6 },
     },
     native: null,
+    sweepGasCeilingGwei: 5,
   },
   // BNB Smart Chain testnet (Chapel). Blocks are sub-second since the Maxwell
   // upgrade and fast finality settles a block in two or three, so 12 is already
@@ -347,11 +604,14 @@ export const NETWORKS = {
     },
     tokens: {
       // Verified on-chain: symbol()="USDT", decimals()=18.
+      // No `sweep`: unprobed, because this network has no RPC credential here.
       USDT: { address: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd", decimals: 18 },
       // Verified on-chain: symbol()="USDC", decimals()=18.
       USDC: { address: "0x64544969ed7EBf5f083679233325356EbE738930", decimals: 18 },
     },
-    native: { symbol: "BNB", decimals: 18 },
+    // The coin needs no contract capability: a native sweep is balance − fee.
+    native: { symbol: "BNB", decimals: 18, sweep: { via: "native" } },
+    sweepGasCeilingGwei: 10,
   },
   // Polygon Amoy testnet, the Mumbai replacement.
   // Faucet (test POL): https://faucet.polygon.technology
@@ -373,9 +633,11 @@ export const NETWORKS = {
     },
     tokens: {
       // Circle's Amoy USDC. Verified on-chain: symbol()="USDC", decimals()=6.
+      // No `sweep`: unprobed, because this network has no RPC credential here.
       USDC: { address: "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582", decimals: 6 },
     },
-    native: { symbol: "POL", decimals: 18 },
+    native: { symbol: "POL", decimals: 18, sweep: { via: "native" } },
+    sweepGasCeilingGwei: 200,
   },
   // -- Mainnets ---------------------------------------------------------
   // Registered but not served unless ENABLE_MAINNETS is set (see NETWORK_IDS).
@@ -400,10 +662,15 @@ export const NETWORKS = {
     tokens: {
       // Both verified on-chain: 18 decimals, not 6. Binance-Peg USDT is the
       // 0x55d3… contract; USDC is 0x8AC7….
+      // Neither carries a `sweep`: they are unprobed, and a mainnet pairing may
+      // not acquire one from inference. Binance-Peg tokens are not Circle
+      // FiatTokens and are not expected to implement EIP-3009, so `prefund` is
+      // the likely answer — which the probe has to establish, not this comment.
       USDT: { address: "0x55d398326f99059fF775485246999027B3197955", decimals: 18 },
       USDC: { address: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", decimals: 18 },
     },
-    native: { symbol: "BNB", decimals: 18 },
+    native: { symbol: "BNB", decimals: 18, sweep: { via: "native" } },
+    sweepGasCeilingGwei: 5,
   },
   // Polygon PoS. Bor produces ~2s blocks and reorgs of a few blocks are routine;
   // Heimdall milestones give deterministic finality well inside 128 blocks
@@ -423,13 +690,15 @@ export const NETWORKS = {
     tokens: {
       // Native-issued Circle USDC (not the bridged USDC.e). Verified on-chain:
       // symbol()="USDC", decimals()=6.
+      // Unprobed, so no `sweep` — see the note on the BSC tokens above.
       USDC: { address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", decimals: 6 },
       // Tether on Polygon, 6 decimals. Its symbol() now reads "USDT0" after the
       // migration to the omnichain deployment; it is quoted and displayed here
       // as USDT, which is what a payer's wallet shows.
       USDT: { address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", decimals: 6 },
     },
-    native: { symbol: "POL", decimals: 18 },
+    native: { symbol: "POL", decimals: 18, sweep: { via: "native" } },
+    sweepGasCeilingGwei: 300,
   },
   // Tron Nile testnet. Blocks are ~3s and a block is irreversible after ~19
   // (SR consensus), which is what `confirmations` encodes here.
@@ -444,11 +713,18 @@ export const NETWORKS = {
       address: "https://nile.tronscan.org/#/address/{v}",
     },
     tokens: {
-      // Verified on-chain: symbol()="USDT", decimals()=6.
-      USDT: { address: "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf", decimals: 6 },
+      // Verified on-chain: symbol()="USDT", decimals()=6. The probe confirms it
+      // implements no EIP-3009 (`authorizationState` reverts), which is the
+      // normal TRC-20 answer — so value leaves by delegating energy to the
+      // deposit address rather than by an off-chain authorization.
+      USDT: {
+        address: "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
+        decimals: 6,
+        sweep: { via: "delegate" },
+      },
     },
     // TRX is quoted in sun: 6 decimals, like the TRC-20s beside it.
-    native: { symbol: "TRX", decimals: 6 },
+    native: { symbol: "TRX", decimals: 6, sweep: { via: "native" } },
   },
 } satisfies Record<string, NetworkDef>;
 
@@ -532,6 +808,55 @@ export function assetFor(network: NetworkId, asset: string): AssetRef | undefine
   return token
     ? { kind: "token", symbol: asset, address: token.address, decimals: token.decimals }
     : undefined;
+}
+
+/**
+ * How value leaves a deposit address for this pairing, or undefined when the
+ * pairing is not sweepable (§4.5 of docs/SWEEPING-PLAN.md).
+ *
+ * Undefined is the safe default and the common one: a pairing acquires a
+ * mechanism only after `scripts/sweep-probe.ts` has confirmed it against the
+ * contract. Everything else simply accumulates, exactly as it does today.
+ */
+export function sweepFor(network: NetworkId, asset: string): SweepVia | undefined {
+  const net = NETWORKS[network];
+  if (net.native && net.native.symbol === asset) return net.native.sweep;
+  const tokens = net.tokens as Record<string, { sweep?: SweepVia }>;
+  return tokens[asset]?.sweep;
+}
+
+/**
+ * The currency a transaction fee is paid in on this network.
+ *
+ * Not the same question as `native`, and the two must not be conflated in either
+ * direction:
+ *
+ *  - `native` is the chain's coin *as a payment asset the gateway accepts*, and
+ *    it is null on Sepolia and Base, which quote stablecoins only. Those chains
+ *    still charge ETH for gas, so a sweep cost there is denominated in a coin
+ *    with no entry in `tokens` or `native` at all.
+ *  - `chain.nativeCurrency` always names the fee currency, but names it as the
+ *    *chain* does — and a testnet renames it. viem reports BSC testnet's coin as
+ *    `tBNB`, which no price feed has ever heard of, so pricing a sweep against
+ *    it silently fails and every BNB sweep defers as `unpriceable` forever.
+ *
+ * So: prefer the registry's own name for the coin when there is one, since it is
+ * the mainnet name the rate service can actually quote, and fall back to viem
+ * only where the gateway has not named it. Both describe the same coin; this
+ * picks the source that can be priced.
+ *
+ * A testnet coin priced at its mainnet rate is fictional in absolute terms, and
+ * deliberately so — it is the same arithmetic mainnet will run.
+ */
+export function gasCoinFor(network: NetworkId): NativeAssetDef {
+  const net = NETWORKS[network];
+  if (net.family === "tron") return net.native ?? { symbol: "TRX", decimals: 6 };
+  return (
+    net.native ?? {
+      symbol: net.chain.nativeCurrency.symbol,
+      decimals: net.chain.nativeCurrency.decimals,
+    }
+  );
 }
 
 /**

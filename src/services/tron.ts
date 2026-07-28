@@ -272,6 +272,79 @@ export function parseNativeTransfer(
   };
 }
 
+/**
+ * An account's TRX and TRC-20 balances, in one call.
+ *
+ * TronGrid returns both on the account resource, so a full picture of what an
+ * address holds costs a single request — unlike EVM, where the native balance
+ * and each token are separate reads. Returns null for an account that has never
+ * been activated on-chain, which is not an error: an address with no history
+ * simply does not exist yet, and holds nothing.
+ *
+ * Auditing only. Nothing in the payment path may read a balance — settlement is
+ * event-sourced from Transfer logs and must stay that way.
+ */
+export async function getAccountBalances(
+  net: TronNetworkDef,
+  address: string
+): Promise<{ trx: bigint; trc20: Map<string, bigint> } | null> {
+  const json = await get<{
+    data?: Array<{ balance?: number; trc20?: Array<Record<string, string>> }>;
+  }>(net, `/v1/accounts/${address}`);
+
+  const account = json.data?.[0];
+  if (!account) return null;
+
+  const trc20 = new Map<string, bigint>();
+  for (const entry of account.trc20 ?? []) {
+    for (const [contract, amount] of Object.entries(entry)) {
+      trc20.set(contract, BigInt(amount));
+    }
+  }
+  return { trx: BigInt(account.balance ?? 0), trc20 };
+}
+
+/**
+ * A read-only contract call — Tron's `eth_call`.
+ *
+ * `owner_address` is required even though nothing is spent, so callers pass any
+ * valid account; the node uses it as `msg.sender` and charges nothing. Returns
+ * the raw ABI-encoded result, without a leading `0x`.
+ *
+ * Throws when the call reverts or the function does not exist, which is what
+ * makes it usable as a capability probe (see scripts/sweep-probe.ts): on Tron
+ * there is no bytecode-scan shortcut, so "does this contract implement X" is
+ * answered by asking it.
+ */
+export async function triggerConstantContract(
+  net: TronNetworkDef,
+  contractHex: string,
+  ownerHex: string,
+  functionSelector: string,
+  parameter = ""
+): Promise<string> {
+  const json = await post<{
+    result?: { result?: boolean; code?: string; message?: string };
+    constant_result?: string[];
+  }>(net, "/wallet/triggerconstantcontract", {
+    owner_address: ownerHex,
+    contract_address: contractHex,
+    function_selector: functionSelector,
+    parameter,
+    visible: false,
+  });
+
+  if (json.result?.result !== true) {
+    const reason = json.result?.code ?? "unknown";
+    throw new Error(`TronGrid constant call ${functionSelector} failed: ${reason}`);
+  }
+  const result = json.constant_result?.[0];
+  if (typeof result !== "string" || result.length === 0) {
+    throw new Error(`TronGrid constant call ${functionSelector} returned no data`);
+  }
+  return result;
+}
+
 export type TronTxInfo = {
   id: string;
   blockNumber: number;
