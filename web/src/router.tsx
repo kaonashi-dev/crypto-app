@@ -3,8 +3,11 @@ import { CheckoutRoute } from "./checkout/CheckoutRoute";
 import { AdminLayout } from "./admin/AdminLayout";
 import { PaymentsRoute } from "./admin/PaymentsRoute";
 import { DepositsRoute } from "./admin/DepositsRoute";
+import { SweepsRoute } from "./admin/SweepsRoute";
 import { PaymentDetailRoute } from "./admin/PaymentDetailRoute";
 import { UsersRoute } from "./admin/UsersRoute";
+import { MerchantsRoute } from "./admin/MerchantsRoute";
+import { BuildRoute } from "./admin/BuildRoute";
 import { NotFoundPage } from "./checkout/NotFoundPage";
 
 /**
@@ -80,6 +83,19 @@ const depositsRoute = createRoute({
   }),
 });
 
+export type SweepsSearch = { network?: string; status?: string; q?: string };
+
+const sweepsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "sweeps",
+  component: SweepsRoute,
+  validateSearch: (search: Record<string, unknown>): SweepsSearch => ({
+    network: str(search.network),
+    status: str(search.status),
+    q: str(search.q),
+  }),
+});
+
 const paymentDetailRoute = createRoute({
   getParentRoute: () => adminRoute,
   path: "p/$publicId",
@@ -95,9 +111,46 @@ const usersRoute = createRoute({
   component: UsersRoute,
 });
 
+export type MerchantsSearch = { id?: string };
+
+/**
+ * Merchants, and the first two views that can change anything.
+ *
+ * The selected merchant lives in the URL for the same reason the payment filters
+ * do: a console view an operator is asking someone else to look at should survive
+ * being pasted into a thread, and Back should undo a selection.
+ */
+const merchantsRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "merchants",
+  component: MerchantsRoute,
+  validateSearch: (search: Record<string, unknown>): MerchantsSearch => ({
+    id: str(search.id),
+  }),
+});
+
+export type BuildSearch = { client?: string };
+
+const buildRoute = createRoute({
+  getParentRoute: () => adminRoute,
+  path: "build",
+  component: BuildRoute,
+  validateSearch: (search: Record<string, unknown>): BuildSearch => ({
+    client: str(search.client),
+  }),
+});
+
 const routeTree = rootRoute.addChildren([
   checkoutRoute,
-  adminRoute.addChildren([paymentsRoute, depositsRoute, paymentDetailRoute, usersRoute]),
+  adminRoute.addChildren([
+    paymentsRoute,
+    depositsRoute,
+    sweepsRoute,
+    paymentDetailRoute,
+    merchantsRoute,
+    buildRoute,
+    usersRoute,
+  ]),
 ]);
 
 export const router = createRouter({

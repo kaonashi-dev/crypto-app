@@ -11,9 +11,12 @@
  * Cookie shape, and what each attribute is actually for:
  *   HttpOnly  — script in the console cannot read the token, so an injected
  *               script cannot exfiltrate a session.
- *   SameSite=Lax + JSON-only login — a cross-site form post cannot send
- *               `application/json`, and `c.req.json()` refuses anything else, so
- *               there is no CSRF-able state change here.
+ *   SameSite=Lax + JSON-only requests — Lax keeps the cookie off a cross-site
+ *               POST entirely, and a cross-site HTML form cannot send
+ *               `application/json` even if it were attached. Those two together
+ *               are what keep the console's mutations (see `requireOperator`)
+ *               from being CSRF-able; the second half is enforced there rather
+ *               than left to each handler's `c.req.json()`.
  *   Path=/admin — the token is never attached to /api or /pay requests, which
  *               have nothing to do with the console.
  *   Secure    — set whenever the request arrived over TLS (directly or through a
@@ -157,6 +160,67 @@ export const adminSessionGuard: MiddlewareHandler = async (c, next) => {
     "operator.username": session.user.username,
   });
   c.set("operator", session.user);
+  await next();
+};
+
+/**
+ * The extra bar a console *mutation* has to clear, on top of `adminSessionGuard`.
+ *
+ * Two things, both of which the read-only console never had to think about:
+ *
+ *  - **An open console may not write.** With no `ADMIN_PASSWORD` there is no
+ *    account, so there is no identity, so a change cannot be attributed — and an
+ *    unattributable mutation is precisely what `AGENTS.md` forbids. Reads stay
+ *    open in development exactly as before; only writes are refused. Production
+ *    cannot reach this branch at all, because `preflight()` will not boot without
+ *    the variable. The practical cost is that developing the console's write
+ *    surface locally means setting `ADMIN_PASSWORD` in `.env`, which is the right
+ *    way round: the alternative is a trail with holes in it.
+ *  - **A body must be JSON.** `SameSite=Lax` already keeps the session cookie off
+ *    any cross-site POST, so this is defence in depth rather than the primary
+ *    control — but it is the half that does not depend on browser behaviour, and
+ *    it costs one header check. GET/HEAD carry no body, and DELETE cannot be
+ *    issued by an HTML form at all (a cross-site `fetch` with that method is
+ *    preflighted, and nothing here answers CORS), so neither is checked.
+ */
+export const requireOperator: MiddlewareHandler = async (c, next) => {
+  if (!authEnabled()) {
+    count("admin.mutation.rejected", { reason: "console_open" });
+    log.warn("console mutation refused — no operator identity to attribute it to", {
+      "http.route": c.req.path,
+      "http.request.method": c.req.method,
+      "client.address": clientIp(c),
+    });
+    return c.json(
+      {
+        error: "auth_required_for_mutation",
+        details:
+          "This console is running open. Set ADMIN_PASSWORD and restart to sign in; " +
+          "changes have to be attributable to an operator.",
+      },
+      403
+    );
+  }
+
+  // adminSessionGuard runs first and has already rejected a request without a
+  // live session, so this is a type narrowing rather than a second check.
+  const operator = c.get("operator");
+  if (!operator) return c.json({ error: "unauthenticated" }, 401);
+
+  if (c.req.method !== "GET" && c.req.method !== "HEAD" && c.req.method !== "DELETE") {
+    const contentType = c.req.header("content-type")?.toLowerCase() ?? "";
+    if (!contentType.startsWith("application/json")) {
+      count("admin.mutation.rejected", { reason: "bad_content_type" });
+      log.warn("console mutation refused — body is not JSON", {
+        "http.route": c.req.path,
+        "http.request.method": c.req.method,
+        "http.request.header.content_type": contentType || "(absent)",
+        "operator.username": operator.username,
+      });
+      return c.json({ error: "unsupported_media_type" }, 415);
+    }
+  }
+
   await next();
 };
 

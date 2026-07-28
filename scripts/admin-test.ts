@@ -8,10 +8,12 @@
  */
 import "./quiet"; // must precede every ../src import
 import { randomBytes } from "crypto";
+import { eq } from "drizzle-orm";
 import { app } from "../src/api/routes";
 import { db, schema, sql } from "../src/db";
 import { env, NETWORKS, NETWORK_IDS } from "../src/config";
-import { copToRaw } from "../src/services/rates";
+import { copToRaw, primeRateCache } from "../src/services/rates";
+import { hashApiKey } from "../src/services/merchants";
 import { deriveAddress, reserveDerivationIndex } from "../src/services/wallet";
 import { bootstrapOperator } from "../src/services/admin-auth";
 
@@ -232,6 +234,13 @@ async function main() {
   console.log("\n[GET /admin/api/stats]");
   let r = await json("/admin/api/stats");
   assert(r.status === 200, "stats -> 200");
+  assert(typeof r.body.sweeps?.by_status?.planned === "number", "sweep status tallies present");
+  assert(Array.isArray(r.body.sweeps?.unswept), "unswept value per (network, asset) present");
+  assert(
+    typeof r.body.config?.sweep_enabled === "boolean" &&
+      Array.isArray(r.body.config?.sweep_pairings),
+    "the sweeping switches and the sweepable pairings are surfaced"
+  );
   assert(
     ["pending", "detecting", "partially_paid", "paid", "expired", "underpaid_expired"].every(
       (k) => typeof r.body.payments.by_status[k] === "number"
@@ -333,6 +342,84 @@ async function main() {
   r = await json(`/admin/api/deposits?confirmed=true&q=${pendingTx}`);
   assert(r.body.deposits.length === 0, "confirmed=true excludes it");
 
+  console.log("\n[GET /admin/api/sweeps]");
+  // A row per status is inserted directly: the sweeper itself needs a chain and
+  // a treasury, while this is checking the read surface the console renders.
+  const sweptAddress = deriveAddress(idx, "eth-sepolia");
+  const sweepTx = "0x" + randomBytes(32).toString("hex");
+  await db.insert(schema.sweeps).values([
+    {
+      network: "eth-sepolia", address: sweptAddress, derivationIndex: idx, asset: "USDC",
+      amountRaw: 4_000_000n, toAddress: "0x000000000000000000000000000000000000dEaD",
+      via: "eip3009", status: "confirmed", txHash: sweepTx, blockNumber: 900n,
+      feeRaw: 120_000_000_000_000n,
+    },
+    {
+      network: "eth-sepolia", address: sweptAddress, derivationIndex: idx, asset: "USDT",
+      amountRaw: 1_000n, toAddress: "0x000000000000000000000000000000000000dEaD",
+      via: "eip3009", status: "skipped", reason: "below_floor",
+    },
+  ]);
+
+  r = await json("/admin/api/sweeps");
+  assert(r.status === 200, "sweeps -> 200");
+  assert(Array.isArray(r.body.statuses) && r.body.statuses.includes("skipped"),
+    "the status vocabulary is served for the filter");
+  r = await json(`/admin/api/sweeps?q=${sweepTx}`);
+  assert(r.body.sweeps.length === 1, "search by transaction hash finds the sweep");
+  const sw = r.body.sweeps[0];
+  assert(sw.amount_raw === "4000000", "sweep amount serialized as a string");
+  assert(sw.fee_raw === "120000000000000", "fee serialized as a string");
+  // Sepolia quotes stablecoins and accepts no native asset, but its fees are
+  // still charged in ETH — the fee currency is not the quoted one.
+  assert(sw.fee_asset === "ETH" && sw.fee_decimals === 18, "the fee is denominated in the chain's fee currency");
+  assert(sw.decimals === 6, "the swept asset's decimals come from the registry");
+  assert(sw.derivation_index === idx, "the sweep carries the derivation index of its address");
+  r = await json(`/admin/api/sweeps?status=skipped&q=${sweptAddress}`);
+  assert(
+    r.body.sweeps.length === 1 && r.body.sweeps[0].reason === "below_floor",
+    "the status filter isolates deferrals, and the reason explains them"
+  );
+  assert(
+    !/private|mnemonic|signature/i.test(JSON.stringify(r.body)),
+    "no key material or signature reaches the console"
+  );
+
+  console.log("\n[GET /admin/api/wallets]");
+  // The only console route that reads a chain. It must answer without one:
+  // every network here either has no RPC credential or is unreachable from a
+  // test run, and reporting that honestly is the behaviour being checked.
+  r = await json("/admin/api/wallets");
+  assert(r.status === 200, "wallets -> 200");
+  assert(
+    r.body.networks.length === NETWORK_IDS.length,
+    "every served network is listed, including ones with no credential"
+  );
+  const evm = r.body.networks.find((n: any) => n.network === "bsc-testnet");
+  assert(evm?.reachable === false && typeof evm?.error === "string",
+    "a network without its RPC credential reports unreachable, with the reason");
+  assert(
+    evm.wallets.every((w: any) => w.balances.length === 0 && typeof w.note === "string"),
+    "…and reports no balances with an explanation — unknown is never rendered as zero"
+  );
+  assert(
+    r.body.networks.every((n: any) =>
+      n.wallets.map((w: any) => w.role).join() === "treasury,relayer"
+    ),
+    "every network reports both wallet roles"
+  );
+  const relayers = new Set(
+    r.body.networks
+      .filter((n: any) => n.family === "evm")
+      .map((n: any) => n.wallets.find((w: any) => w.role === "relayer").address)
+  );
+  assert(relayers.size === 1, "one EVM relayer address across every EVM network");
+  assert(
+    !/private|mnemonic|secret/i.test(JSON.stringify(r.body)),
+    "no key material reaches the wallets view"
+  );
+  assert(typeof r.body.age_s === "number", "the response reports how stale its readings are");
+
   console.log("\n[GET /admin/api/users]");
   r = await json("/admin/api/users");
   assert(r.status === 200, "users -> 200");
@@ -429,6 +516,233 @@ async function main() {
   assert(raw.includes(`"amount_cop"`), "detail payload actually returned");
   assert(!/"amount_cop":\s*\d/.test(raw), "amount_cop is quoted, never a bare number");
   assert(!/"amount_raw":\s*\d/.test(raw), "amount_raw is quoted, never a bare number");
+
+  // -- The write surface ------------------------------------------------
+  // Everything above this line is a SELECT. Everything below mutates, and each
+  // one has to leave an admin_audit_log row behind — that trail is the condition
+  // AGENTS.md puts on the console having a write surface at all.
+  console.log("\n[console write surface]");
+
+  /** A console request with a body, carrying whatever session we hold. */
+  const send = (
+    path: string,
+    method: string,
+    body?: unknown,
+    headers: Record<string, string> = {}
+  ) =>
+    app.request(path, {
+      method,
+      headers: {
+        ...adminHeaders,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+        ...headers,
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  if (!env.adminPassword) {
+    // The guard's entire purpose. With no operator account there is nobody to
+    // attribute a change to, so writes are refused while reads carry on working —
+    // and this script says plainly which half it just skipped, rather than
+    // reporting a pass over checks it never ran.
+    const refused = await send("/admin/api/clients", "POST", { name: "Should Not Exist" });
+    assert(refused.status === 403, "an open console refuses a write -> 403");
+    assert(
+      ((await refused.json()) as any).error === "auth_required_for_mutation",
+      "...and names the reason"
+    );
+    assert((await get("/admin/api/stats")).status === 200, "...while reads still answer");
+    const [ghost] = await db
+      .select()
+      .from(schema.clients)
+      .where(eq(schema.clients.name, "Should Not Exist"));
+    assert(!ghost, "...and nothing was written");
+    console.log(
+      "  note- ADMIN_PASSWORD is unset, so the write surface itself was NOT exercised.\n" +
+        "        Re-run with ADMIN_PASSWORD set to cover merchant CRUD and console payments."
+    );
+  } else {
+    console.log("\n  [guards]");
+    const wrongType = await app.request("/admin/api/clients", {
+      method: "POST",
+      headers: { ...adminHeaders, "content-type": "text/plain" },
+      body: JSON.stringify({ name: "Wrong Content Type" }),
+    });
+    assert(wrongType.status === 415, "a body that is not application/json -> 415");
+
+    const noSession = await app.request("/admin/api/clients", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "No Session" }),
+    });
+    assert(noSession.status === 401, "a write with no session -> 401");
+
+    console.log("\n  [merchant create]");
+    const createRes = await send("/admin/api/clients", "POST", {
+      name: "Console Created Merchant",
+      webhook_url: "https://webhook.site/console-created",
+    });
+    assert(createRes.status === 201, "merchant create -> 201");
+    const created = (await createRes.json()) as any;
+    const merchantId: string = created.client.id;
+    const firstKey: string = created.api_key;
+    const firstSecret: string = created.webhook_secret;
+
+    assert(typeof firstKey === "string" && firstKey.startsWith("gk_"), "an api key is returned");
+    assert(
+      typeof firstSecret === "string" && firstSecret.startsWith("whsec_"),
+      "a webhook secret is returned — the one thing seed.ts never surfaced"
+    );
+    const [storedRow] = await db
+      .select()
+      .from(schema.clients)
+      .where(eq(schema.clients.id, merchantId));
+    assert(
+      storedRow!.apiKeyHash === (await hashApiKey(firstKey)),
+      "what is stored is the hash of the key that was handed out"
+    );
+    assert(
+      (await app.request("/api/me", { headers: { "X-Api-Key": firstKey } })).status === 200,
+      "the new key authenticates against the merchant API"
+    );
+
+    console.log("\n  [merchant detail never re-serves a secret]");
+    const detail = await json(`/admin/api/clients/${merchantId}`);
+    assert(detail.status === 200, "merchant detail -> 200");
+    assert(detail.body.client.api_key_hash_prefix.length === 12, "a hash prefix is shown");
+    assert(detail.body.deletable === true, "a merchant with nothing pointing at it is deletable");
+    const detailText = JSON.stringify(detail.body);
+    assert(!detailText.includes(firstKey), "the api key is never returned again");
+    assert(!detailText.includes(firstSecret), "the webhook secret is never returned again");
+
+    console.log("\n  [merchant update]");
+    const patched = await send(`/admin/api/clients/${merchantId}`, "PATCH", {
+      name: "Renamed Merchant",
+    });
+    assert(patched.status === 200, "merchant update -> 200");
+    assert(((await patched.json()) as any).client.name === "Renamed Merchant", "the rename lands");
+
+    const badUrl = await send(`/admin/api/clients/${merchantId}`, "PATCH", {
+      webhook_url: "ftp://example.com/hook",
+    });
+    assert(badUrl.status === 400, "a webhook url that is not http(s) is refused");
+
+    let trail = await json(`/admin/api/audit?target_id=${merchantId}`);
+    const updateEntry = trail.body.entries.find((e: any) => e.action === "merchant.update");
+    assert(Boolean(updateEntry), "the update wrote an audit row");
+    assert(
+      updateEntry?.detail?.before?.name === "Console Created Merchant" &&
+        updateEntry?.detail?.after?.name === "Renamed Merchant",
+      "the audit row carries before and after"
+    );
+    assert(updateEntry?.operator_username === env.adminUser, "the audit row names the operator");
+    assert(typeof updateEntry?.trace_id === "string", "the audit row carries its trace id");
+
+    console.log("\n  [credential rotation]");
+    const rotated = (await (
+      await send(`/admin/api/clients/${merchantId}/api-key`, "POST", {})
+    ).json()) as any;
+    assert(rotated.api_key !== firstKey, "rotation issues a different key");
+    assert(
+      (await app.request("/api/me", { headers: { "X-Api-Key": firstKey } })).status === 401,
+      "the previous key stops authenticating immediately"
+    );
+    assert(
+      (await app.request("/api/me", { headers: { "X-Api-Key": rotated.api_key } })).status === 200,
+      "the replacement authenticates"
+    );
+
+    const newSecret = (await (
+      await send(`/admin/api/clients/${merchantId}/webhook-secret`, "POST", {})
+    ).json()) as any;
+    assert(newSecret.webhook_secret !== firstSecret, "a different webhook secret is issued");
+
+    console.log("\n  [payment created by an operator]");
+    // Primed so this exercises the real createPayment() without reaching
+    // CoinGecko — the whole point is that the console path and the merchant path
+    // are the same code, so mirroring it here would prove nothing.
+    primeRateCache("USDC", RATE);
+    const payRes = await send("/admin/api/payments", "POST", {
+      client_id: merchantId,
+      amount_cop: "50000",
+      asset: "USDC",
+      network: "base-sepolia",
+      metadata: { order_id: "ORD-CONSOLE-WRITE" },
+    });
+    assert(payRes.status === 201, "console payment create -> 201");
+    const consolePayment = (await payRes.json()) as any;
+    assert(
+      consolePayment.amount_crypto_raw === "12500000",
+      "the operator path quotes exactly like the merchant path"
+    );
+    assert(
+      typeof consolePayment.checkout_url === "string" &&
+        consolePayment.checkout_url.endsWith(`/pay/${consolePayment.id}`),
+      "a checkout url is returned, built the same way"
+    );
+
+    const listed = await json(`/admin/api/payments?client_id=${merchantId}`);
+    assert(
+      listed.body.payments.some((x: any) => x.id === consolePayment.id),
+      "the payment shows up in the console's own list"
+    );
+    trail = await json("/admin/api/audit?action=payment.create");
+    assert(
+      trail.body.entries.some((e: any) => e.target_id === consolePayment.id),
+      "the payment create wrote an audit row"
+    );
+
+    console.log("\n  [delete semantics]");
+    const hardRefused = await send(`/admin/api/clients/${merchantId}?hard=true`, "DELETE");
+    assert(hardRefused.status === 409, "hard delete of a merchant with payments -> 409");
+    const refusal = (await hardRefused.json()) as any;
+    assert(refusal.counts.payments >= 1, "the refusal reports what still references it");
+
+    const soft = await send(`/admin/api/clients/${merchantId}`, "DELETE");
+    assert(soft.status === 200, "soft delete -> 200");
+    assert(((await soft.json()) as any).client.is_active === false, "the merchant is deactivated");
+    assert(
+      (await app.request("/api/me", { headers: { "X-Api-Key": rotated.api_key } })).status === 401,
+      "a deactivated merchant's key stops authenticating"
+    );
+    const refusedPayment = await send("/admin/api/payments", "POST", {
+      client_id: merchantId,
+      amount_cop: "50000",
+      asset: "USDC",
+      network: "base-sepolia",
+    });
+    assert(refusedPayment.status === 409, "a payment for a deactivated merchant -> 409");
+
+    const throwawayId = (
+      (await (
+        await send("/admin/api/clients", "POST", { name: "Throwaway Merchant" })
+      ).json()) as any
+    ).client.id;
+    const gone = await send(`/admin/api/clients/${throwawayId}?hard=true`, "DELETE");
+    assert(gone.status === 200, "hard delete of an unused merchant -> 200");
+    const [absent] = await db
+      .select()
+      .from(schema.clients)
+      .where(eq(schema.clients.id, throwawayId));
+    assert(!absent, "the row is actually gone");
+    const orphaned = await json(`/admin/api/audit?target_id=${throwawayId}`);
+    assert(
+      orphaned.body.entries.some((e: any) => e.action === "merchant.delete"),
+      "the deletion is still on the record after the merchant is gone"
+    );
+
+    console.log("\n  [no credential ever reaches the trail]");
+    const auditDump = await (await get("/admin/api/audit?limit=200")).text();
+    assert(!auditDump.includes(firstKey), "the first api key is not in the audit trail");
+    assert(!auditDump.includes(rotated.api_key), "the rotated api key is not in the audit trail");
+    assert(!auditDump.includes(firstSecret), "the first webhook secret is not in the audit trail");
+    assert(
+      !auditDump.includes(newSecret.webhook_secret),
+      "the rotated webhook secret is not in the audit trail"
+    );
+    const writeLogs = await (await get("/admin/api/logs?limit=300")).text();
+    assert(!writeLogs.includes(firstKey), "no api key reaches the log tail either");
+  }
 
   // Last, because it spends the session every check above needed: a logout has
   // to end the session server-side, not just clear the browser's cookie.

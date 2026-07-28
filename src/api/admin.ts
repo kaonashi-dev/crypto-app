@@ -13,8 +13,15 @@
  * development may leave it unset and run open. There is no per-merchant scoping
  * here — an operator who reaches these routes sees everything.
  *
- * Every route is a SELECT. Nothing here mutates the payment state machine, so
- * the console can never corrupt a payment no matter what it is asked to render.
+ * Every route in *this* file is a SELECT. Nothing here mutates the payment state
+ * machine, so the console can never corrupt a payment no matter what it is asked
+ * to render.
+ *
+ * That is a property of this file, not of the console as a whole: the write
+ * surface — merchant CRUD and operator-issued payments — lives in
+ * ./admin-write.ts, mounted at the same prefix and behind its own additional
+ * guard. Keeping the split is what lets the sentence above stay checkable, so a
+ * mutation belongs there even when the read it pairs with is here.
  */
 import { Hono } from "hono";
 import { and, count, desc, eq, ilike, inArray, or, sql, sum } from "drizzle-orm";
@@ -24,13 +31,19 @@ import {
   NETWORK_IDS,
   env,
   assetFor,
+  gasCoinFor,
   configSummary,
   missingCredential,
+  sweepablePairings,
   type NetworkId,
 } from "../config";
 import { requiredWithTolerance } from "../services/payments";
+import { unsweptTotals } from "../workers/sweeper";
+import { walletOverview } from "../services/treasury";
 import { rateCacheState } from "../services/rates";
 import { activeSessionCounts } from "../services/admin-auth";
+import { AUDIT_ACTIONS, auditTrail } from "../services/audit";
+import { apiKeyHashPrefix } from "../services/merchants";
 import {
   recentLogs,
   loggingConfig,
@@ -69,6 +82,40 @@ function networkMeta(id: string) {
     // (a mainnet with ENABLE_MAINNETS unset), so the console distinguishes
     // "gone" from "never existed".
     offered: (NETWORK_IDS as readonly string[]).includes(id),
+  };
+}
+
+/**
+ * One audit row on the wire.
+ *
+ * `detail` was serialized and secret-scrubbed on the way in (services/audit.ts)
+ * and is parsed back here so the console renders a diff rather than a string. A
+ * row written before a schema change may not parse; that is shown as null rather
+ * than failing the whole response.
+ */
+function auditView(e: Awaited<ReturnType<typeof auditTrail>>["entries"][number]) {
+  let detail: unknown = null;
+  if (e.detail) {
+    try {
+      detail = JSON.parse(e.detail);
+    } catch {
+      detail = null;
+    }
+  }
+  return {
+    id: e.id,
+    operator_id: e.operatorId,
+    operator_username: e.operatorUsername,
+    action: e.action,
+    target_type: e.targetType,
+    target_id: e.targetId,
+    outcome: e.outcome,
+    detail,
+    ip_address: e.ipAddress,
+    user_agent: e.userAgent,
+    // The handle that expands this row into its full request in /admin/api/logs.
+    trace_id: e.traceId,
+    created_at: e.createdAt,
   };
 }
 
@@ -112,7 +159,7 @@ function paymentFilters(q: Record<string, string | undefined>) {
 // Header readout: payment counts per status, on-chain and queue health, and the
 // business parameters currently in force (so a surprising quote is explainable).
 adminApi.get("/stats", async (c) => {
-  const [byStatus, byNetwork, deposits, queue, clients] = await Promise.all([
+  const [byStatus, byNetwork, deposits, queue, clients, sweepCounts, unswept] = await Promise.all([
     db
       .select({
         status: schema.payments.status,
@@ -145,6 +192,13 @@ adminApi.get("/stats", async (c) => {
       .from(schema.webhookJobs),
 
     db.select({ n: count() }).from(schema.clients),
+
+    db
+      .select({ status: schema.sweeps.status, n: count() })
+      .from(schema.sweeps)
+      .groupBy(schema.sweeps.status),
+
+    unsweptTotals(),
   ]);
 
   const counts = Object.fromEntries(STATUSES.map((st) => [st, 0])) as Record<Status, number>;
@@ -166,6 +220,17 @@ adminApi.get("/stats", async (c) => {
       dead: queue[0]?.dead ?? 0,
     },
     clients: Number(clients[0]?.n ?? 0),
+    sweeps: {
+      by_status: Object.fromEntries(
+        schema.sweepStatus.enumValues.map((st) => [
+          st,
+          Number(sweepCounts.find((r) => r.status === st)?.n ?? 0),
+        ])
+      ),
+      // Confirmed in minus confirmed out, per (network, asset). The headline
+      // number for "how much is still sitting at deposit addresses".
+      unswept,
+    },
     // Surfacing the live parameters makes a frozen quote or a dust-tolerance
     // settle reproducible without reading .env on the server.
     config: {
@@ -173,6 +238,14 @@ adminApi.get("/stats", async (c) => {
       grace_ttl_min: env.graceTtlMin,
       spread_bps: Number(env.spreadBps),
       dust_bps: Number(env.dustBps),
+      sweep_enabled: env.sweepEnabled,
+      sweep_dry_run: env.sweepDryRun,
+      sweep_min_usd: env.sweepMinUsd,
+      sweep_max_cost_bps: Number(env.sweepMaxCostBps),
+      // Which pairings this build can consolidate at all — the answer to "why
+      // has nothing swept", which is almost always a registry gap rather than a
+      // switch.
+      sweep_pairings: sweepablePairings(),
     },
     networks: Object.keys(NETWORKS).map(networkMeta),
     statuses: STATUSES,
@@ -222,6 +295,105 @@ adminApi.get("/clients", async (c) => {
       payments: paymentsPerClient.get(r.id) ?? 0,
     })),
   });
+});
+
+// -- GET /admin/api/clients/:id ----------------------------------------
+// One merchant, with the numbers the Merchants view needs to decide what may be
+// done to it: the reference counts a hard delete would violate, and the payment
+// mix that says whether it has ever been used.
+//
+// `api_key_hash_prefix` is the same handle src/api/auth.ts logs when it rejects a
+// key, which is what lets an operator match a 401 in the log tail to an account.
+// The hash itself and the webhook secret are not selected — not masked in the
+// response, not selected — so no later edit to this handler can start returning
+// them.
+adminApi.get("/clients/:id", async (c) => {
+  const id = c.req.param("id");
+  // An invalid uuid would make Postgres error rather than return nothing.
+  if (!UUID_RE.test(id)) return c.json({ error: "not_found" }, 404);
+
+  const [row] = await db.select().from(schema.clients).where(eq(schema.clients.id, id));
+  if (!row) return c.json({ error: "not_found" }, 404);
+
+  const [byStatus, ledger, webhooks, audit] = await Promise.all([
+    db
+      .select({ status: schema.payments.status, n: count() })
+      .from(schema.payments)
+      .where(eq(schema.payments.clientId, id))
+      .groupBy(schema.payments.status),
+    db
+      .select({ n: count(), total: sum(schema.ledgerEntries.amountCop) })
+      .from(schema.ledgerEntries)
+      .where(eq(schema.ledgerEntries.clientId, id)),
+    db
+      .select({
+        total: count(),
+        pending: sql<number>`(count(*) filter (where ${schema.webhookJobs.deliveredAt} is null and ${schema.webhookJobs.attempts} < 8))::int`,
+        dead: sql<number>`(count(*) filter (where ${schema.webhookJobs.deliveredAt} is null and ${schema.webhookJobs.attempts} >= 8))::int`,
+      })
+      .from(schema.webhookJobs)
+      .where(eq(schema.webhookJobs.clientId, id)),
+    auditTrail({ targetType: "client", targetId: id, limit: 20 }),
+  ]);
+
+  const payments = byStatus.reduce((acc, r) => acc + Number(r.n), 0);
+
+  return c.json({
+    client: {
+      id: row.id,
+      name: row.name,
+      balance_cop: s(row.balanceCop),
+      webhook_url: row.webhookUrl,
+      is_active: row.isActive,
+      created_at: row.createdAt,
+      api_key_hash_prefix: apiKeyHashPrefix(row.apiKeyHash),
+    },
+    payments: {
+      total: payments,
+      by_status: Object.fromEntries(
+        STATUSES.map((st) => [st, Number(byStatus.find((r) => r.status === st)?.n ?? 0)])
+      ),
+    },
+    ledger: { entries: Number(ledger[0]?.n ?? 0), credited_cop: ledger[0]?.total ?? "0" },
+    webhooks: {
+      total: Number(webhooks[0]?.total ?? 0),
+      pending: webhooks[0]?.pending ?? 0,
+      dead: webhooks[0]?.dead ?? 0,
+    },
+    // What a hard delete would have to violate. Advisory: the foreign key is what
+    // actually refuses it (see the DELETE handler in ./admin-write.ts), because
+    // these counts race a watcher inserting a deposit.
+    references: {
+      payments,
+      ledger_entries: Number(ledger[0]?.n ?? 0),
+      webhook_jobs: Number(webhooks[0]?.total ?? 0),
+    },
+    deletable: payments === 0 && Number(ledger[0]?.n ?? 0) === 0 && Number(webhooks[0]?.total ?? 0) === 0,
+    audit: audit.entries.map(auditView),
+  });
+});
+
+// -- GET /admin/api/audit ----------------------------------------------
+// The console's own trail: every mutation an operator has made through /admin.
+//
+// A read of a read-only view still leaves no trace — that gap is unchanged. What
+// this covers is every *change*, which is the half that was blocking the console
+// from having any write surface at all (see services/audit.ts).
+adminApi.get("/audit", async (c) => {
+  const q = c.req.query();
+  const limit = Math.min(Number(q.limit) || 50, PAGE_MAX);
+  const offset = Math.max(Number(q.offset) || 0, 0);
+
+  const { total, entries } = await auditTrail({
+    action: q.action?.trim() || undefined,
+    targetType: q.target_type?.trim() || undefined,
+    targetId: q.target_id?.trim() || undefined,
+    operatorId: q.operator_id && UUID_RE.test(q.operator_id) ? q.operator_id : undefined,
+    limit,
+    offset,
+  });
+
+  return c.json({ total, limit, offset, actions: AUDIT_ACTIONS, entries: entries.map(auditView) });
 });
 
 // -- GET /admin/api/payments -------------------------------------------
@@ -512,6 +684,138 @@ adminApi.get("/diagnostics", (c) =>
     metrics: snapshot(),
   })
 );
+
+// -- GET /admin/api/wallets --------------------------------------------
+// What the gateway's own wallets hold, read from the chain.
+//
+// The only console route that reads a chain rather than the database, and the
+// only one whose cost is metered — so it is a route of its own rather than part
+// of /stats, which every view polls. Readings are cached server-side for 30s
+// (see services/treasury.ts) and the response reports its own age.
+//
+// Balance reads are legitimate here for the same narrow reason they are in
+// reconciliation: this is auditing, never settlement. Nothing on this path
+// touches a payment.
+adminApi.get("/wallets", async (c) => {
+  const overview = await walletOverview();
+  return c.json({
+    age_s: overview.age_s,
+    // Mapped rather than spread, so the wire stays snake_case like every other
+    // response here and the service keeps its own naming.
+    networks: overview.networks.map((n) => ({
+      network: n.network,
+      family: n.family,
+      testnet: n.testnet,
+      reachable: n.reachable,
+      error: n.error,
+      wallets: n.wallets.map((w) => ({
+        role: w.role,
+        address: w.address,
+        note: w.note,
+        balances: w.balances.map((b) => ({
+          asset: b.asset,
+          raw: b.raw,
+          decimals: b.decimals,
+          kind: b.kind,
+          is_fee_currency: b.isFeeCurrency,
+        })),
+      })),
+    })),
+    cache_ttl_s: 30,
+    // Repeated from /stats so this view is self-contained: the switches explain
+    // why a correctly-funded relayer still is not sweeping anything.
+    sweep: {
+      enabled: env.sweepEnabled,
+      dry_run: env.sweepDryRun,
+      signer: env.sweepSigner,
+      pairings: sweepablePairings(),
+    },
+  });
+});
+
+// -- GET /admin/api/sweeps ---------------------------------------------
+// Consolidation of deposit addresses into the treasury, newest first.
+//
+// Read-only like everything else here, and deliberately so: `AGENTS.md` holds
+// /admin to no mutation without an audit model to go with it, and a console
+// button that moves money is the last place to make an exception. A "sweep now"
+// action is deferred until that model exists — see §2.2 and §13.1 of
+// docs/SWEEPING-PLAN.md.
+//
+// The `reason` column is the point of the view. Most rows are deferrals rather
+// than failures — below the floor, gas too expensive, no mechanism yet — and
+// that is normal operation, not a queue backing up.
+adminApi.get("/sweeps", async (c) => {
+  const q = c.req.query();
+  const limit = Math.min(Number(q.limit) || 100, PAGE_MAX);
+
+  const conds = [];
+  if (q.network && NETWORKS[q.network as NetworkId]) {
+    conds.push(eq(schema.sweeps.network, q.network));
+  }
+  if (q.status && (schema.sweepStatus.enumValues as readonly string[]).includes(q.status)) {
+    conds.push(eq(schema.sweeps.status, q.status as (typeof schema.sweepStatus.enumValues)[number]));
+  }
+  if (q.asset) conds.push(eq(schema.sweeps.asset, q.asset));
+  const term = q.q?.trim();
+  if (term) {
+    const pat = `%${term}%`;
+    conds.push(
+      or(
+        ilike(schema.sweeps.address, pat),
+        ilike(schema.sweeps.txHash, pat),
+        ilike(schema.sweeps.toAddress, pat)
+      )
+    );
+  }
+  const where = conds.length ? and(...conds) : undefined;
+
+  const [rows, total] = await Promise.all([
+    db
+      .select()
+      .from(schema.sweeps)
+      .where(where)
+      .orderBy(desc(schema.sweeps.createdAt))
+      .limit(limit),
+    db.select({ n: count() }).from(schema.sweeps).where(where),
+  ]);
+
+  return c.json({
+    total: Number(total[0]?.n ?? 0),
+    limit,
+    statuses: schema.sweepStatus.enumValues,
+    sweeps: rows.map((r) => ({
+      id: r.id,
+      network: r.network,
+      address: r.address,
+      derivation_index: r.derivationIndex,
+      asset: r.asset,
+      amount_raw: s(r.amountRaw),
+      decimals: assetFor(r.network as NetworkId, r.asset)?.decimals ?? 6,
+      to_address: r.toAddress,
+      via: r.via,
+      status: r.status,
+      reason: r.reason,
+      tx_hash: r.txHash,
+      block_number: s(r.blockNumber),
+      // In the network's fee currency, which is not always an asset the gateway
+      // quotes — Sepolia charges ETH and accepts only stablecoins.
+      fee_raw: s(r.feeRaw),
+      fee_asset: gasCoinFor(r.network as NetworkId).symbol,
+      fee_decimals: gasCoinFor(r.network as NetworkId).decimals,
+      attempts: r.attempts,
+      next_attempt_at: r.nextAttemptAt,
+      last_error: r.lastError,
+      // The authorization nonce is shown: it is a replay key the chain has
+      // already recorded, not a secret, and it is what makes an on-chain sweep
+      // traceable back to this row.
+      authorization_nonce: r.authorizationNonce,
+      valid_before: r.validBefore,
+      created_at: r.createdAt,
+      updated_at: r.updatedAt,
+    })),
+  });
+});
 
 // -- GET /admin/api/deposits -------------------------------------------
 // Flat feed of every Transfer the watchers have recorded, newest first. This is

@@ -80,6 +80,45 @@ async function main() {
   assert(pv.amount_crypto_raw === "12500000", "12.5 USDC required for 50k COP @4000");
   assert(pv.metadata?.order_id === "ORD-001", "metadata round-trips");
 
+  console.log("\n[GET /api/payments/:id/status]");
+  res = await app.request(`/api/payments/${p!.publicId}/status`);
+  assert(res.status === 401, "status without an api key -> 401");
+  res = await app.request(`/api/payments/${p!.publicId}/status`, {
+    headers: { "X-Api-Key": apiKey },
+  });
+  assert(res.status === 200, "authed status fetch -> 200");
+  const statusBody = await res.text();
+  const st = JSON.parse(statusBody) as any;
+  assert(st.id === p!.publicId, "status reports the payment it was asked about");
+  assert(st.status === "pending", "status carries the current state");
+  assert(st.terminal === false, "pending is not terminal");
+  assert(st.decimals === 6, "decimals come from the (network, asset) pairing");
+  assert(st.amount_crypto_raw === "12500000", "required amount agrees with the detail route");
+  // The whole point of the endpoint is being polled by a machine, so the amounts
+  // have to survive JSON.parse in a language with 64-bit floats.
+  assert(!/"amount_crypto_raw":\s*\d/.test(statusBody), "amounts are quoted, never bare numbers");
+  assert(!/"amount_cop":\s*\d/.test(statusBody), "amount_cop is quoted, never a bare number");
+  assert(statusBody.includes('"address"') === false, "status omits the receiving address");
+
+  // Another merchant's payment answers exactly as an unknown id does, so this is
+  // not an oracle for which payments exist.
+  const otherKey = "gk_test_" + randomBytes(16).toString("hex");
+  await db.insert(schema.clients).values({
+    name: "Status Scope Merchant",
+    apiKeyHash: Buffer.from(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(otherKey))
+    ).toString("hex"),
+    webhookSecret: "whsec_" + randomBytes(8).toString("hex"),
+  });
+  res = await app.request(`/api/payments/${p!.publicId}/status`, {
+    headers: { "X-Api-Key": otherKey },
+  });
+  assert(res.status === 404, "another merchant's payment -> 404");
+  res = await app.request("/api/payments/does-not-exist/status", {
+    headers: { "X-Api-Key": apiKey },
+  });
+  assert(res.status === 404, "unknown id -> 404, the same answer");
+
   console.log("\n[GET /public/payments/:id]");
   res = await app.request(`/public/payments/${p!.publicId}`);
   assert(res.status === 200, "public status -> 200");

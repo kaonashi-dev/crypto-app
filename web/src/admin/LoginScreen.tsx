@@ -136,8 +136,8 @@ export function LoginScreen(props: { onSignedIn: () => void }) {
         </form>
 
         <p class="mt-4 text-[0.7rem] leading-relaxed text-ink-3">
-          Internal operator console. It is read-only, but it spans every merchant and shows
-          operational internals the merchant API hides — sign-ins are logged.
+          Internal operator console. It spans every merchant and shows operational internals the
+          merchant API hides. Sign-ins are logged, and so is every change you make.
         </p>
       </div>
     </div>

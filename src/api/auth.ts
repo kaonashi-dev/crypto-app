@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from "hono";
 import { eq } from "drizzle-orm";
 import { db, schema } from "../db";
+import { apiKeyHashPrefix, hashApiKey } from "../services/merchants";
 import { getLogger, addContextAttributes, count } from "../observability";
 
 const log = getLogger("auth");
@@ -22,9 +23,7 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     return c.json({ error: "missing_api_key" }, 401);
   }
 
-  const hash = Buffer.from(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))
-  ).toString("hex");
+  const hash = await hashApiKey(key);
 
   const [client] = await db
     .select()
@@ -35,7 +34,7 @@ export const apiKeyAuth: MiddlewareHandler = async (c, next) => {
     count("auth.rejected", { reason: "unknown" });
     log.warn("api key not recognised", {
       "http.route": c.req.path,
-      "client.api_key_hash_prefix": hash.slice(0, 12),
+      "client.api_key_hash_prefix": apiKeyHashPrefix(hash),
     });
     return c.json({ error: "invalid_api_key" }, 401);
   }

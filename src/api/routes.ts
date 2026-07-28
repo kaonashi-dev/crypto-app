@@ -1,15 +1,16 @@
 import { Hono, type Context } from "hono";
 import { serveStatic } from "hono/bun";
-import { z } from "zod";
 import { eq } from "drizzle-orm";
 import QRCode from "qrcode";
 import { db, schema } from "../db";
-import { NETWORKS, ASSETS, NETWORK_IDS, env, assetFor, type NetworkId } from "../config";
+import { NETWORKS, env, assetFor, type NetworkId } from "../config";
 import { createPayment } from "../services/payments";
 import { publicPaymentView } from "../services/webhooks";
 import { apiKeyAuth } from "./auth";
 import { adminApi } from "./admin";
+import { adminWriteApi } from "./admin-write";
 import { adminAuthApi, adminSessionGuard } from "./admin-auth";
+import { createPaymentSchema, originSource, publicOrigin } from "./http";
 import { scanTronPayment } from "../workers/tron-watcher";
 import {
   getLogger,
@@ -117,26 +118,6 @@ async function spaShell(c: Context) {
 }
 
 /**
- * Origin to build merchant-facing links from.
- *
- * A TLS-terminating proxy (Railway's edge, any load balancer) forwards plain
- * HTTP, so `c.req.url` reports scheme `http` and a `checkout_url` derived from it
- * would hand the merchant an insecure link to show a payer. The forwarded headers
- * carry the original scheme and host instead. They are client-settable in
- * principle, so a deployment on a fixed domain should pin `PUBLIC_BASE_URL`,
- * which wins outright.
- */
-function publicOrigin(c: Context): string {
-  if (env.publicBaseUrl) return env.publicBaseUrl;
-  const url = new URL(c.req.url);
-  // Each header is a comma-separated chain when several proxies are in front.
-  const first = (h: string) => c.req.header(h)?.split(",")[0]?.trim();
-  const proto = first("x-forwarded-proto") ?? url.protocol.replace(":", "");
-  const host = first("x-forwarded-host") ?? url.host;
-  return `${proto}://${host}`;
-}
-
-/**
  * Builds the QR payload + wallet deep link for a payment row.
  *
  * EVM uses EIP-681 in one of its two forms: a token payment targets the
@@ -169,15 +150,6 @@ async function buildCheckoutAssets(p: typeof schema.payments.$inferSelect) {
   };
 }
 
-const createSchema = z.object({
-  amount_cop: z.coerce.bigint().positive(),
-  // Derived from the network registry so supported combinations cannot drift
-  // apart from config. createPayment rejects invalid asset/network pairings.
-  asset: z.enum(ASSETS),
-  network: z.enum(NETWORK_IDS),
-  metadata: z.unknown().optional(),
-});
-
 // Liveness only, and deliberately thin: it is public, and the platform hits it
 // constantly. Operational detail lives behind the console at
 // /admin/api/diagnostics.
@@ -197,7 +169,7 @@ app.post("/api/payments", apiKeyAuth, async (c) => {
     });
     return c.json({ error: "bad_request", details: "invalid JSON body" }, 400);
   }
-  const body = createSchema.safeParse(raw);
+  const body = createPaymentSchema.safeParse(raw);
   if (!body.success) {
     // The failing fields, not the body: a merchant integrating against this
     // needs to know which field was wrong, and we should not echo their payload.
@@ -227,11 +199,7 @@ app.post("/api/payments", apiKeyAuth, async (c) => {
   httpLog.info("checkout issued", {
     "payment.id": p.publicId,
     "url.full": checkoutUrl,
-    "http.origin_source": env.publicBaseUrl
-      ? "PUBLIC_BASE_URL"
-      : c.req.header("x-forwarded-host")
-        ? "x-forwarded-host"
-        : "request-host",
+    "http.origin_source": originSource(c),
   });
 
   return c.json({ ...publicPaymentView(p), checkout_url: checkoutUrl }, 201);
@@ -244,6 +212,56 @@ app.get("/api/payments/:publicId", apiKeyAuth, async (c) => {
     .where(eq(schema.payments.publicId, c.req.param("publicId")));
   if (!p || p.clientId !== c.get("client").id) return c.json({ error: "not_found" }, 404);
   return c.json(publicPaymentView(p));
+});
+
+/**
+ * Poll-shaped view of one payment: the settlement numbers and nothing else.
+ *
+ * Distinct from the route above, which returns `publicPaymentView` — the same
+ * body a webhook carries, metadata and receiving address included. A backend
+ * polling an order until it settles wants neither, and wants two things that view
+ * does not carry: `decimals`, so the raw amounts can be formatted without a
+ * second lookup, and `terminal`, so the poller can stop without hardcoding which
+ * members of the status enum are ends.
+ *
+ * `/:publicId/status` rather than `/payments/status`: a static segment registered
+ * after `/payments/:publicId` would never be reached, because Hono matches in
+ * registration order and the parameter would swallow it. Nesting has no such
+ * hazard and cannot be broken by a later reordering of this file.
+ *
+ * Scoped to the caller's own payments, and a 404 for anyone else's — the same
+ * answer an unknown id gets, so this is not an oracle for which ids exist.
+ */
+const TERMINAL_STATUSES: readonly string[] = ["paid", "expired", "underpaid_expired"];
+
+app.get("/api/payments/:publicId/status", apiKeyAuth, async (c) => {
+  const [p] = await db
+    .select()
+    .from(schema.payments)
+    .where(eq(schema.payments.publicId, c.req.param("publicId")));
+  if (!p || p.clientId !== c.get("client").id) return c.json({ error: "not_found" }, 404);
+
+  // Decimals are a property of the (network, asset) pairing, never of the symbol.
+  const asset = assetFor(p.network as NetworkId, p.asset);
+
+  return c.json({
+    id: p.publicId,
+    status: p.status,
+    terminal: TERMINAL_STATUSES.includes(p.status),
+    asset: p.asset,
+    network: p.network,
+    decimals: asset?.decimals ?? null,
+    // Every amount is a bigint in the smallest unit: strings on the wire, because
+    // JSON numbers cannot carry an 18-decimal amount without losing digits.
+    amount_cop: p.amountCop.toString(),
+    amount_crypto_raw: p.amountCryptoRaw.toString(),
+    confirmed_raw: p.confirmedRaw.toString(),
+    pending_raw: p.pendingRaw.toString(),
+    overpaid_raw: p.overpaidRaw.toString(),
+    quote_expires_at: p.quoteExpiresAt,
+    grace_expires_at: p.graceExpiresAt,
+    paid_at: p.paidAt,
+  });
 });
 
 app.get("/api/me", apiKeyAuth, (c) => {
@@ -408,7 +426,14 @@ app.use("/admin/api/*", adminSessionGuard);
 app.route("/admin/api/auth", adminAuthApi);
 
 // Registered before the /admin/* shell route so the data routes win the match.
+//
+// Reads and writes are two routers at one prefix, and the split is the point:
+// ./admin.ts states that every route in it is a SELECT, which is a promise worth
+// more than putting related handlers next to each other. Nothing collides —
+// Hono matches on method and path together, and the write router's own guard
+// (`requireOperator`) applies to its routes alone.
 app.route("/admin/api", adminApi);
+app.route("/admin/api", adminWriteApi);
 
 // -- SPA (Solid + Tailwind, served from ./web/dist) ---------------------
 app.use("/assets/*", serveStatic({ root: WEB_DIST }));

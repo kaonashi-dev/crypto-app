@@ -407,6 +407,233 @@ export function SearchInput(props: {
   );
 }
 
+export function TextInput(props: {
+  value: string;
+  onInput: (v: string) => void;
+  placeholder?: string;
+  label: string;
+  type?: string;
+  mono?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <input
+      type={props.type ?? "text"}
+      aria-label={props.label}
+      value={props.value}
+      disabled={props.disabled}
+      onInput={(e) => props.onInput(e.currentTarget.value)}
+      placeholder={props.placeholder}
+      class={`${CONTROL} w-full disabled:opacity-50 placeholder:text-ink-3 ${
+        props.mono ? "font-mono placeholder:font-sans" : ""
+      }`}
+    />
+  );
+}
+
+export function TextArea(props: {
+  value: string;
+  onInput: (v: string) => void;
+  placeholder?: string;
+  label: string;
+  rows?: number;
+  invalid?: boolean;
+}) {
+  return (
+    <textarea
+      aria-label={props.label}
+      aria-invalid={props.invalid || undefined}
+      value={props.value}
+      rows={props.rows ?? 4}
+      onInput={(e) => props.onInput(e.currentTarget.value)}
+      placeholder={props.placeholder}
+      class={`w-full rounded border bg-plane px-2 py-1.5 font-mono text-[0.78rem] leading-relaxed text-ink transition-colors placeholder:font-sans placeholder:text-ink-3 focus-visible:ring-2 focus-visible:ring-ink-3/40 focus-visible:outline-none ${
+        props.invalid
+          ? "border-critical focus-visible:border-critical"
+          : "border-hairline hover:border-baseline focus-visible:border-ink-3"
+      }`}
+    />
+  );
+}
+
+const BUTTON_TONE = {
+  default: "border-hairline text-ink-2 enabled:hover:border-baseline enabled:hover:text-ink",
+  primary: "border-ink-3 bg-ink-3/15 text-ink enabled:hover:border-ink-2 enabled:hover:bg-ink-3/25",
+  danger: "border-critical/60 text-critical enabled:hover:border-critical enabled:hover:bg-critical/10",
+} as const;
+
+export function Button(props: {
+  onClick: () => void;
+  children: JSX.Element;
+  tone?: keyof typeof BUTTON_TONE;
+  disabled?: boolean;
+  title?: string;
+  type?: "button" | "submit";
+}) {
+  return (
+    <button
+      type={props.type ?? "button"}
+      title={props.title}
+      disabled={props.disabled}
+      onClick={() => props.onClick()}
+      class={`cursor-pointer rounded border px-3 py-1.5 text-[0.78rem] whitespace-nowrap transition-colors disabled:cursor-default disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ink-2 focus-visible:outline-none ${
+        BUTTON_TONE[props.tone ?? "default"]
+      }`}
+    >
+      {props.children}
+    </button>
+  );
+}
+
+const CALLOUT_TONE = {
+  info: "border-hairline text-ink-3",
+  warn: "border-warn/50 text-warn",
+  critical: "border-critical/50 text-critical",
+} as const;
+
+/** A short standing note: a consequence, a caveat, a refusal. */
+export function Callout(props: {
+  tone?: keyof typeof CALLOUT_TONE;
+  children: JSX.Element;
+}) {
+  return (
+    <p
+      class={`rounded border px-3 py-2 text-[0.72rem] leading-relaxed ${
+        CALLOUT_TONE[props.tone ?? "info"]
+      }`}
+    >
+      {props.children}
+    </p>
+  );
+}
+
+/**
+ * A destructive action that states what it will do before it does it.
+ *
+ * Inline rather than a modal: `window.confirm` blocks the page, and a console
+ * that freezes mid-incident to ask a question is worse than one that asks it in
+ * place. Arming is per-instance, so two of these on a page cannot be confused.
+ */
+export function InlineConfirm(props: {
+  label: string;
+  confirmLabel: string;
+  consequence: string;
+  tone?: keyof typeof BUTTON_TONE;
+  disabled?: boolean;
+  onConfirm: () => void;
+}) {
+  const [armed, setArmed] = createSignal(false);
+
+  return (
+    <Show
+      when={armed()}
+      fallback={
+        <Button tone={props.tone ?? "danger"} disabled={props.disabled} onClick={() => setArmed(true)}>
+          {props.label}
+        </Button>
+      }
+    >
+      <span class="inline-flex flex-wrap items-center gap-2">
+        <span class="text-[0.72rem] text-ink-2">{props.consequence}</span>
+        <Button
+          tone={props.tone ?? "danger"}
+          onClick={() => {
+            setArmed(false);
+            props.onConfirm();
+          }}
+        >
+          {props.confirmLabel}
+        </Button>
+        <Button onClick={() => setArmed(false)}>Cancel</Button>
+      </span>
+    </Show>
+  );
+}
+
+/** Two or three mutually exclusive modes, where a dropdown would hide the choice. */
+export function SegmentedControl<T extends string>(props: {
+  value: T;
+  onChange: (v: T) => void;
+  options: Array<{ value: T; label: string; title?: string }>;
+  label: string;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={props.label}
+      class="inline-flex overflow-hidden rounded border border-hairline"
+    >
+      <For each={props.options}>
+        {(o) => (
+          <button
+            type="button"
+            role="radio"
+            aria-checked={props.value === o.value}
+            title={o.title}
+            onClick={() => props.onChange(o.value)}
+            class={`cursor-pointer px-3 py-1.5 text-[0.75rem] transition-colors focus-visible:ring-2 focus-visible:ring-ink-2 focus-visible:outline-none ${
+              props.value === o.value
+                ? "bg-ink-3/20 text-ink"
+                : "text-ink-3 hover:bg-plane/60 hover:text-ink-2"
+            }`}
+          >
+            {o.label}
+          </button>
+        )}
+      </For>
+    </div>
+  );
+}
+
+/**
+ * A credential, shown once.
+ *
+ * The server returns an API key or a webhook secret in the response to the call
+ * that generated it and in no other response ever — so this panel is the only
+ * moment the value exists outside the merchant's own records. It is therefore
+ * dismissed by hand rather than on a timer or a navigation, and it says what
+ * happens if it is closed too early.
+ */
+export function SecretReveal(props: {
+  title: string;
+  /** One row per credential — each labelled and separately copyable. */
+  values: Array<{ label: string; value: string }>;
+  note: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div class="rounded border border-warn/50 bg-warn/5 px-4 py-3">
+      <div class="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 class="text-[0.7rem] font-semibold tracking-[0.12em] text-warn uppercase">
+          {props.title}
+        </h3>
+        <span class="text-[0.66rem] tracking-[0.1em] text-warn uppercase">shown once</span>
+      </div>
+      <div class="mt-2 space-y-2">
+        <For each={props.values}>
+          {(item) => (
+            <div>
+              <span class="text-[0.64rem] tracking-[0.1em] text-ink-3 uppercase">
+                {item.label}
+              </span>
+              <div class="mt-1 flex items-center gap-2 rounded border border-hairline bg-plane px-2.5 py-2">
+                <code class="min-w-0 flex-1 font-mono text-[0.78rem] break-all text-ink select-all">
+                  {item.value}
+                </code>
+                <CopyButton value={item.value} label={item.label} />
+              </div>
+            </div>
+          )}
+        </For>
+      </div>
+      <p class="mt-2 text-[0.7rem] leading-relaxed text-ink-2">{props.note}</p>
+      <div class="mt-2.5">
+        <Button onClick={props.onDismiss}>I have copied it — dismiss</Button>
+      </div>
+    </div>
+  );
+}
+
 export function Empty(props: { children: JSX.Element }) {
   return <p class="px-4 py-8 text-center text-[0.8rem] text-ink-3">{props.children}</p>;
 }

@@ -166,6 +166,134 @@ export const adminSessions = pgTable("admin_sessions", {
   index("admin_sessions_expires_idx").on(t.expiresAt),
 ]);
 
+// -- Console audit trail -----------------------------------------------
+/**
+ * Every mutation an operator makes through /admin, append-only.
+ *
+ * This table is the precondition the rest of the console's write surface was
+ * waiting on: `AGENTS.md` holds `/admin` to no console-driven mutation without an
+ * audit model, and a cross-merchant tool that can mint API keys is exactly the
+ * one whose actions have to be attributable afterwards.
+ *
+ * Four properties it is shaped by:
+ *
+ *  - **Append-only.** No route updates or deletes a row here, and none should be
+ *    added: a trail you can edit answers a different question than the one it is
+ *    kept for.
+ *  - **Written in the mutation's own transaction** wherever the mutation is a
+ *    single transaction, so a committed change can never be missing its record.
+ *  - **The operator is snapshotted, not only referenced.** `operator_username`
+ *    survives a rename, and the foreign key is `set null` rather than `cascade` —
+ *    deleting an account must not delete the evidence of what it did.
+ *  - **No secret is ever stored here.** `detail` is built per route from an
+ *    explicit field list and scrubbed again on the way in (services/audit.ts);
+ *    an API key exists in exactly one HTTP response and nowhere else.
+ */
+export const adminAuditLog = pgTable("admin_audit_log", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  operatorId: uuid("operator_id").references(() => adminUsers.id, { onDelete: "set null" }),
+  operatorUsername: text("operator_username").notNull(),
+  /** 'merchant.create' | 'merchant.update' | 'payment.create' | … */
+  action: text("action").notNull(),
+  targetType: text("target_type").notNull(),  // 'client' | 'payment' | 'operator'
+  targetId: text("target_id"),                // uuid or public id, depending on the target
+  detail: text("detail"),                     // serialized JSON, secret-scrubbed
+  outcome: text("outcome").notNull(),         // 'ok' | 'denied' | 'error'
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  /**
+   * The request's trace id, which is what makes a row here expandable into the
+   * full story: the same id is on every record the mutation emitted, and the
+   * console's own log tail (/admin/api/logs) searches by it.
+   */
+  traceId: text("trace_id"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("admin_audit_created_idx").on(t.createdAt),
+  index("admin_audit_target_idx").on(t.targetType, t.targetId),
+  index("admin_audit_operator_idx").on(t.operatorId),
+]);
+
+// -- Treasury sweeps ---------------------------------------------------
+// Consolidating per-payment deposit addresses into one treasury per family.
+// See docs/SWEEPING-PLAN.md; this table is §6.
+export const sweepStatus = pgEnum("sweep_status", [
+  "planned",     // policy selected it; nothing signed yet
+  "authorized",  // signed, and safe to re-sign or re-broadcast — see below
+  "broadcast",   // submitted, awaiting confirmations
+  "confirmed",   // final
+  "failed",      // terminal after max attempts; needs an operator
+  "skipped",     // deliberately not swept (below the floor, fee too high)
+]);
+
+/**
+ * One attempt to move one asset out of one deposit address.
+ *
+ * Deliberately **no foreign key to `payments` or `deposits`**. A sweep is about
+ * an *address and an asset*, not a payment: an address may hold value from
+ * several deposits, from a deposit in an asset its payment never quoted, or from
+ * a transfer that matched no payment at all. Coupling the two would make the
+ * sweeper unable to recover exactly the funds most likely to be stranded, which
+ * are the ones no payment claims.
+ *
+ * Nothing here is read by the payment state machine, and nothing here writes to
+ * it. Settlement is event-sourced from Transfer logs and never reads a balance,
+ * so emptying an address — at any moment, including mid-grace on a partially
+ * paid payment — cannot change what a payment settles at. The address stays
+ * usable and a later top-up is still detected and still credited.
+ */
+export const sweeps = pgTable("sweeps", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  network: text("network").notNull(),          // see NETWORKS in src/config.ts
+  address: text("address").notNull(),          // the deposit address (source)
+  derivationIndex: integer("derivation_index").notNull(),
+  asset: text("asset").notNull(),              // the symbol being moved
+  amountRaw: rawAmount("amount_raw").notNull(),
+  toAddress: text("to_address").notNull(),     // treasury, snapshotted at plan time
+  via: text("via").notNull(),                  // 'eip3009' | 'prefund' | 'delegate' | 'native'
+
+  /**
+   * The EIP-3009 replay key: 32 random bytes, persisted BEFORE anything is
+   * signed. This column is what makes a retry exactly-once.
+   *
+   * The token contract records a used authorization nonce and rejects a replay,
+   * so recovery after a crash re-signs *this stored value* and produces a
+   * byte-identical authorization: if the first broadcast landed the chain
+   * refuses the second, and if it did not the second succeeds. The guarantee is
+   * enforced on-chain rather than by our locking. Null on the paths that have no
+   * authorization — there the account nonce below plays the same role.
+   */
+  authorizationNonce: text("authorization_nonce"),
+  validBefore: timestamp("valid_before"),
+  /** Relayer account nonce, persisted before broadcast for the same reason. */
+  accountNonce: integer("account_nonce"),
+
+  txHash: text("tx_hash"),
+  blockNumber: bigint("block_number", { mode: "bigint" }),
+  /** Fee actually paid, in the network's *fee* currency — not in `asset`. */
+  feeRaw: rawAmount("fee_raw"),
+  status: sweepStatus("status").notNull().default("planned"),
+  /** Why a row is `skipped` or `failed`: 'below_floor', 'fee_too_high', … */
+  reason: text("reason"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  // At most one *live* sweep per (network, address, asset). Partial, so
+  // historical confirmed/failed/skipped rows never block a later sweep of the
+  // same address — an address is reusable and will receive again.
+  uniqueIndex("sweeps_live_idx")
+    .on(t.network, t.address, t.asset)
+    .where(sql`status in ('planned','authorized','broadcast')`),
+  // Two rows may never share an authorization nonce on one network. Postgres
+  // permits many NULLs in a unique index, so the paths without one are unaffected.
+  uniqueIndex("sweeps_auth_nonce_idx").on(t.network, t.authorizationNonce),
+  index("sweeps_due_idx").on(t.status, t.nextAttemptAt),
+  index("sweeps_address_idx").on(t.network, t.address),
+]);
+
 // -- Global HD derivation counter -------------------------------------
 export const hdCounter = pgTable("hd_counter", {
   id: integer("id").primaryKey().default(1),

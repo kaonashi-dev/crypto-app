@@ -145,6 +145,18 @@ async function getUsdCop(): Promise<number> {
 }
 
 /**
+ * The USD -> COP leg on its own, cache, degradation ladder and all.
+ *
+ * Exposed for the sweeper, whose floor is configured in USD (`SWEEP_MIN_USD`)
+ * while every amount it works with is in raw token units. No spread is applied:
+ * this is a threshold, not a quote, and moving it in the gateway's favour would
+ * only mean sweeping slightly later.
+ */
+export function getUsdCopRate(): Promise<number> {
+  return getUsdCop();
+}
+
+/**
  * Returns COP per 1 whole unit of the asset, scaled x1e6, with the spread
  * already applied (in the gateway's favor).
  * e.g. USDC at 4,100.25 COP -> 4_100_250_000n
@@ -225,6 +237,23 @@ export function copToRaw(
   const scale = 10n ** BigInt(decimals);
   const num = amountCop * 1_000_000n * scale;
   return (num + rateCopPerUnitE6 - 1n) / rateCopPerUnitE6; // ceil division
+}
+
+/**
+ * Seeds the quote cache directly, so a caller can exercise the real creation
+ * path without reaching a pricing provider.
+ *
+ * For the offline test scripts only. `scripts/create-payment.ts` solves the same
+ * problem by mirroring `createPayment` and injecting a fixed rate, which works for
+ * a demo but means the tests would be exercising a copy of the code rather than
+ * the code — and the one thing `POST /admin/api/payments` has to prove is that it
+ * goes through the same service the merchant API does.
+ *
+ * Nothing in `src/` calls this, and a seeded entry ages out on the same TTL as a
+ * fetched one, so it cannot pin a running gateway to a stale quote.
+ */
+export function primeRateCache(asset: string, copPerUnitE6: bigint): void {
+  rateCache.set(asset, { value: copPerUnitE6, fetchedAt: Date.now() });
 }
 
 /** Cache state for /admin/api/diagnostics. */
