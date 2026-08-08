@@ -1,4 +1,4 @@
-# Logging
+# Observability
 
 Every module logs through one service (`src/observability/`). Nothing in `src/`
 writes to `console` directly — that single rule is what makes level control,
@@ -63,9 +63,10 @@ LOG_LEVEL=info,db=trace              # add every SQL statement
 ```
 
 Scopes: `config`, `gateway`, `db`, `http`, `auth`, `payments`, `rates`,
-`wallet`, `webhooks`, `trongrid`, `metrics`, and per network
+`wallet`, `signer`, `sweeper`, `treasury`, `webhooks`, `trongrid`, `metrics`, and per network
 `supervisor:<network>`, `watcher:<network>`, `confirmer:<network>`,
-`tron-watcher:<network>`, `tron-confirmer:<network>`.
+`tron-watcher:<network>`, `tron-confirmer:<network>`, `sweeper:<network>`,
+`sweep-recon:<network>`.
 
 Roughly what lives where:
 
@@ -128,6 +129,17 @@ usually not the one you are testing from — a deployed container has none at al
 ?limit=200
 ```
 
+`GET /admin/api/wallets` — what the gateway's own treasury and relayer addresses
+hold, read from the chain. The only console route that is not a database query,
+and so the only one with a metered cost: readings are cached server-side for 30s
+and the response reports its own `age_s`. Balance reads are auditing, never
+settlement — the same narrow exception reconciliation takes.
+
+An unreachable network reports `reachable: false` with no balances, rather than
+zeros. Unknown and empty must not look alike here: "the relayer has no gas" is
+the actionable finding this endpoint exists for, and a silent zero from a dead
+RPC would fake it.
+
 `GET /admin/api/diagnostics` — the configuration in force, counters and timings
 since boot, the pricing caches, per-network enabled state, and where logs are
 being exported. Answers "is the watcher actually running", "how many provider
@@ -156,6 +168,50 @@ Totals live at `/admin/api/diagnostics`. Series worth knowing: `payments.created
 `deposits.ignored{reason=…}` is the one to check first when a transfer visibly
 landed on-chain but nothing happened: `unknown_address`, `duplicate`,
 `terminal_payment`, `late`.
+
+Sweeping adds `sweeps.eligible`, `sweeps.planned`, `sweeps.broadcast`,
+`sweeps.confirmed`, `sweeps.failed`, `sweeps.retried`,
+`sweeps.skipped{reason=…}`, `sweeps.domain_failures{network,asset}`,
+`sweeps.unswept_value_raw{network,asset}`, `sweeps.relayer_balance_raw` and
+`sweeps.recon_drift`.
+
+`sweeps.skipped{reason=…}` is the counterpart to `deposits.ignored` and the
+first thing to read when value is visibly sitting at a deposit address:
+`below_floor`, `fee_too_high`, `gas_ceiling`, `no_treasury`, `unpriceable`,
+`unimplemented`. All six are *deferrals* — the value stays put and is
+re-evaluated next tick — so a steady count here is normal operation, not a
+backlog. A `sweeps.relayer_balance_raw` of zero, on the other hand, means sweeps
+are being planned that nothing can broadcast.
+
+Attribute namespace: `sweep.*` (`sweep.id`, `sweep.via`, `sweep.amount_raw`,
+`sweep.asset`, `sweep.address`, `sweep.to`, `sweep.authorization_nonce`,
+`sweep.skip_reason`, `sweep.fee_raw`, `sweep.drift_raw`). The authorization
+nonce is a replay key the token contract records publicly, not a secret; the
+signature it authenticates is never logged, and neither is any key material.
+
+## Console mutations
+
+Every change made through `/admin` — merchant CRUD, credential rotation, a payment
+issued by an operator — emits `console mutation` from scope `audit`, at `info`,
+alongside the `admin_audit_log` row written in the same transaction.
+
+Attribute namespace: `audit.*` (`audit.action`, `audit.target_type`,
+`audit.target_id`, `audit.outcome`), always with `operator.id` and
+`operator.username`. Counters: `admin.mutations{action,outcome}`, and
+`admin.mutation.rejected{reason}` for a write refused before it ran
+(`console_open` when no `ADMIN_PASSWORD` is set, `bad_content_type`).
+
+The record deliberately omits the before/after diff: that lives in the row, which
+is not size-bounded the way a log line should be. Both carry the same `trace_id`,
+so `/admin/api/logs?q=<trace>` expands any audit row into the request that
+produced it — that join is the reason the column exists.
+
+**No credential is in either place.** An API key or webhook secret exists in
+plaintext in exactly one HTTP response and nowhere else; the row and the log keep
+`client.api_key_hash_prefix`. `services/audit.ts` masks credential-shaped keys in
+`detail` at any depth using the same rule this sink applies to attributes, and
+passes the serialized result through `redact()` — belt and braces over call sites
+that are already required to hand-build `detail` from an explicit field list.
 
 ## Exporting
 

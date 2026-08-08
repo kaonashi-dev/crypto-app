@@ -1,5 +1,9 @@
 # Testing report — crypto-gateway
 
+> **Archived snapshot, 2026-07-22.** This is a point-in-time validation record, not
+> current product state. For live networks, assets, and verification commands, see
+> [Networks & assets](/guides/networks-and-assets) and [Verification](/contributing/verification).
+
 **Date:** 2026-07-22
 **Scope:** validate the app, validate the API, create 2 test wallets, create a transaction.
 **Environment:** macOS (arm64) · Bun 1.3.14 · Docker 29.4.0 · PostgreSQL 16 (Docker, `localhost:5433`)
