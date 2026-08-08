@@ -20,7 +20,7 @@
  *     the enforcement, because "the call site was careful" is not a property
  *     anyone can verify a year later.
  *
- * Attribute namespace `audit.*` — see docs/LOGGING.md.
+ * Attribute namespace `audit.*` — see docs/architecture/observability.md.
  */
 import { and, count as countRows, desc, eq } from "drizzle-orm";
 import { db, schema } from "../db";

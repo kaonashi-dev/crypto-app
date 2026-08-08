@@ -1,5 +1,5 @@
 /**
- * The sweeper — §8 of docs/SWEEPING-PLAN.md.
+ * The sweeper — §8 of docs/design/SWEEPING-PLAN.md.
  *
  * One loop per network, registered in supervisor.ts beside watcher/confirmer so
  * it inherits the RPC probe gate and does not start until the network answers.

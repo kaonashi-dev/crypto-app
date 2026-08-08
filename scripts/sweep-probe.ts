@@ -1,5 +1,5 @@
 /**
- * Phase 0 of docs/SWEEPING-PLAN.md — the capability probe.
+ * Phase 0 of docs/design/SWEEPING-PLAN.md — the capability probe.
  *
  * Answers, per served (network, asset) pairing and from the chain itself rather
  * than from an assumption: can value leave a deposit address without that

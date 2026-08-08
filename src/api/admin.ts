@@ -740,7 +740,7 @@ adminApi.get("/wallets", async (c) => {
 // /admin to no mutation without an audit model to go with it, and a console
 // button that moves money is the last place to make an exception. A "sweep now"
 // action is deferred until that model exists — see §2.2 and §13.1 of
-// docs/SWEEPING-PLAN.md.
+// docs/design/SWEEPING-PLAN.md.
 //
 // The `reason` column is the point of the view. Most rows are deferrals rather
 // than failures — below the floor, gas too expensive, no mechanism yet — and

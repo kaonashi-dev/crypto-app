@@ -9,7 +9,7 @@
  *   const log = getLogger("payments");
  *   log.info("payment created", { "payment.id": p.publicId, "payment.amount_cop": p.amountCop });
  *
- * See docs/LOGGING.md for the environment variables and the attribute
+ * See docs/architecture/observability.md for the environment variables and the attribute
  * conventions.
  */
 export {
