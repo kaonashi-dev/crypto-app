@@ -69,7 +69,7 @@ export const env = {
   // being one by the end of the working day.
   adminSessionTtlHours: Number(Bun.env.ADMIN_SESSION_TTL_HOURS ?? 12),
 
-  // -- Sweeping (docs/SWEEPING-PLAN.md) --------------------------------
+  // -- Sweeping (docs/design/SWEEPING-PLAN.md) --------------------------------
   //
   // Consolidating per-payment deposit addresses into one treasury. Off by
   // default, and the two switches are not the same switch:
@@ -252,7 +252,7 @@ const TRON_ADDRESS_SHAPE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/;
 const EVM_ADDRESS_SHAPE = /^0x[0-9a-fA-F]{40}$/;
 
 /**
- * The sweeping half of the preflight (docs/SWEEPING-PLAN.md §7.1, §10).
+ * The sweeping half of the preflight (docs/design/SWEEPING-PLAN.md §7.1, §10).
  *
  * Two things are enforced, and only when sweeping is actually switched on:
  *
@@ -391,7 +391,7 @@ export function sweepablePairings(): string[] {
 }
 
 /**
- * How value leaves a deposit address — see §4 of docs/SWEEPING-PLAN.md.
+ * How value leaves a deposit address — see §4 of docs/design/SWEEPING-PLAN.md.
  *
  * A deposit address is an EOA holding only a token, and moving an ERC-20 out of
  * one normally needs native gas *at that address*. Which escape hatch applies is
@@ -812,7 +812,7 @@ export function assetFor(network: NetworkId, asset: string): AssetRef | undefine
 
 /**
  * How value leaves a deposit address for this pairing, or undefined when the
- * pairing is not sweepable (§4.5 of docs/SWEEPING-PLAN.md).
+ * pairing is not sweepable (§4.5 of docs/design/SWEEPING-PLAN.md).
  *
  * Undefined is the safe default and the common one: a pairing acquires a
  * mechanism only after `scripts/sweep-probe.ts` has confirmed it against the

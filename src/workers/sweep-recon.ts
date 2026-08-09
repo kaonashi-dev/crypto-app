@@ -1,5 +1,5 @@
 /**
- * Reconciliation — §9 of docs/SWEEPING-PLAN.md.
+ * Reconciliation — §9 of docs/design/SWEEPING-PLAN.md.
  *
  * Reads what each deposit address actually holds and compares it with what the
  * ledger says it should hold:

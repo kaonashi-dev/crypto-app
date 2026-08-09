@@ -216,7 +216,7 @@ export const adminAuditLog = pgTable("admin_audit_log", {
 
 // -- Treasury sweeps ---------------------------------------------------
 // Consolidating per-payment deposit addresses into one treasury per family.
-// See docs/SWEEPING-PLAN.md; this table is §6.
+// See docs/design/SWEEPING-PLAN.md; this table is §6.
 export const sweepStatus = pgEnum("sweep_status", [
   "planned",     // policy selected it; nothing signed yet
   "authorized",  // signed, and safe to re-sign or re-broadcast — see below

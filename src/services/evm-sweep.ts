@@ -1,5 +1,5 @@
 /**
- * EVM sweep execution — §4.2, §4.4 and §6.3 of docs/SWEEPING-PLAN.md.
+ * EVM sweep execution — §4.2, §4.4 and §6.3 of docs/design/SWEEPING-PLAN.md.
  *
  * Two mechanisms live here because they share a chain client, a fee model and
  * the relayer's nonce queue:
