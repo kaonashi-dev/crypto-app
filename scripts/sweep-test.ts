@@ -1,5 +1,5 @@
 /**
- * Verification for the sweeper — §12 of docs/SWEEPING-PLAN.md.
+ * Verification for the sweeper — §12 of docs/design/SWEEPING-PLAN.md.
  *
  * Covers the four things that would be expensive to learn from a chain:
  *

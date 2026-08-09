@@ -1,5 +1,5 @@
 /**
- * The key boundary — §5 of docs/SWEEPING-PLAN.md.
+ * The key boundary — §5 of docs/design/SWEEPING-PLAN.md.
  *
  * Every signature the gateway produces goes through this interface, and the key
  * material never crosses it. That is the whole purpose: today the implementation
@@ -173,7 +173,7 @@ export function getSigner(): Signer {
   if (env.sweepSigner !== "local") {
     throw new Error(
       `SWEEP_SIGNER=${env.sweepSigner} is not implemented — only "local" exists today ` +
-        `(remote custody is Phase 6 of docs/SWEEPING-PLAN.md)`
+        `(remote custody is Phase 6 of docs/design/SWEEPING-PLAN.md)`
     );
   }
   cached = new LocalSigner();

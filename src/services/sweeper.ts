@@ -1,7 +1,7 @@
 /**
  * Treasury sweeping — candidate selection and policy.
  *
- * Implements §6 and §7 of docs/SWEEPING-PLAN.md. Execution (signing,
+ * Implements §6 and §7 of docs/design/SWEEPING-PLAN.md. Execution (signing,
  * broadcasting, confirming) lives in workers/sweeper.ts; everything here is
  * either a database read or a pure decision, so the policy can be tested
  * without a chain, a signer or a treasury.

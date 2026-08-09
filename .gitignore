@@ -1,5 +1,6 @@
 # deps
 node_modules/
+docs/node_modules/
 
 # env / secrets — never commit these
 .env
@@ -10,6 +11,8 @@ node_modules/
 dist/
 web/dist/
 node_modules/.vite/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 *.tsbuildinfo
 
 # logs
@@ -18,3 +21,4 @@ npm-debug.log*
 
 # OS
 .DS_Store
+
