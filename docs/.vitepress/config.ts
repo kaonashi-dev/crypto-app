@@ -111,6 +111,7 @@ export default withMermaid(
             items: [
               { text: "Sweeping plan", link: "/design/SWEEPING-PLAN" },
               { text: "Console write plan", link: "/design/CONSOLE-WRITE-PLAN" },
+              { text: "Balances and withdrawals plan", link: "/design/BALANCES-WITHDRAWALS-PLAN" },
               { text: "Testing report (archived)", link: "/design/TESTING-REPORT" },
             ],
           },
