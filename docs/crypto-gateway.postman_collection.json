@@ -2,13 +2,13 @@
   "info": {
     "_postman_id": "322075cf-933d-4db2-a766-21b3b5b58c2d",
     "name": "Crypto gateway (COP -> USDC/USDT)",
-    "description": "Every endpoint of the crypto payment gateway, ordered as you would actually drive it: create a charge, watch it settle, then inspect it from the operator console.\n\nImport into HTTPie Desktop (Postman v2.1 is its interchange format), Postman, Insomnia or Bruno.\n\nSET THESE FIRST — collection variables:\n\n- `baseUrl` — defaults to the deployed instance. Use `http://localhost:3000` for local.\n- `apiKey` — from `bun run seed`, printed once. Required by the Merchant API folder.\n- `adminUser` / `adminPassword` — the console operator (`ADMIN_USER`, default `samuel`) and its `ADMIN_PASSWORD`. Run the Console folder's \"Sign in\" request once before the others.\n- `publicId` — leave empty. \"Create payment\" writes it automatically, so every later request follows the payment you just made.\n\nAuth is set per folder, not per request: Merchant API sends `X-Api-Key`, the Console signs in once and then rides the session cookie your client stores, and the public checkout routes send nothing.\n\nMoney is always a string. COP has no decimals and token amounts are in smallest units (USDC and USDT both have 6), so `\"15691642\"` means 15.691642 USDT. Parsing those as JSON numbers loses precision silently, which is why they are never emitted bare.",
+    "description": "Every endpoint of the crypto payment gateway, ordered as you would actually drive it: create a charge, watch it settle, then inspect it from the operator console.\n\nImport into HTTPie Desktop (Postman v2.1 is its interchange format), Postman, Insomnia or Bruno.\n\nSET THESE FIRST — collection variables:\n\n- `baseUrl` — defaults to `http://localhost:3000`. Point it at a deployed host if you are hitting one.\n- `apiKey` — from `bun run seed`, printed once. Required by the Merchant API folder.\n- `adminUser` / `adminPassword` — the console operator (`ADMIN_USER`, default `admin`) and its `ADMIN_PASSWORD`. Run the Console folder's \"Sign in\" request once before the others.\n- `publicId` — leave empty. \"Create payment\" writes it automatically, so every later request follows the payment you just made.\n\nAuth is set per folder, not per request: Merchant API sends `X-Api-Key`, the Console signs in once and then rides the session cookie your client stores, and the public checkout routes send nothing.\n\nMoney is always a string. COP has no decimals and token amounts are in smallest units (USDC and USDT both have 6), so `\"15691642\"` means 15.691642 USDT. Parsing those as JSON numbers loses precision silently, which is why they are never emitted bare.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "baseUrl",
-      "value": "https://crypto-app-production-e3b5.up.railway.app",
+      "value": "http://localhost:3000",
       "type": "string"
     },
     {
@@ -18,7 +18,7 @@
     },
     {
       "key": "adminUser",
-      "value": "samuel",
+      "value": "admin",
       "type": "string"
     },
     {
@@ -296,7 +296,7 @@
     },
     {
       "name": "Console (operator)",
-      "description": "Gated by an operator session. Run \"Sign in\" once — it posts `adminUser`/`adminPassword` to `/admin/api/auth/login` and the response's `Set-Cookie` is stored by your client's cookie jar, so every request below then works unchanged. Sessions last `ADMIN_SESSION_TTL_HOURS` (default 12) and slide while in use; \"Sign out\" ends one server-side.\n\nThe account is created at boot from `ADMIN_USER` (default `samuel`) and `ADMIN_PASSWORD`, and a production boot refuses to start without the password.\n\nCross-merchant and read-only: every data route is a SELECT, so nothing here can corrupt a payment no matter what it is asked to render. There is no per-merchant scoping — whoever signs in sees everything, including internals the merchant API deliberately hides.",
+      "description": "Gated by an operator session. Run \"Sign in\" once — it posts `adminUser`/`adminPassword` to `/admin/api/auth/login` and the response's `Set-Cookie` is stored by your client's cookie jar, so every request below then works unchanged. Sessions last `ADMIN_SESSION_TTL_HOURS` (default 12) and slide while in use; \"Sign out\" ends one server-side.\n\nThe account is created at boot from `ADMIN_USER` (default `admin`) and `ADMIN_PASSWORD`, and a production boot refuses to start without the password.\n\nCross-merchant and read-only: every data route is a SELECT, so nothing here can corrupt a payment no matter what it is asked to render. There is no per-merchant scoping — whoever signs in sees everything, including internals the merchant API deliberately hides.",
       "auth": {
         "type": "noauth"
       },

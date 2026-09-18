@@ -55,22 +55,20 @@ a wallet by hand and stepping through derivation indices.
 
 ### 1.2 The incident that motivated this
 
-On 2026-07-27 payment `h55pv2kw6ksb2a` was created for 15,000 COP / 4.713648
-USDC on `eth-sepolia`, derivation index 5, address
-`0x05F176CB61cb862129Da057Ef08f612676D54005`. The payer sent **4.113648 real
-USDC on Ethereum mainnet** (tx
-`0x393762ea38712d4d0931ad03ec27607586e4cbf81c98a84bd33d53d955bf5554`, contract
-`0xa0b86991…3606eb48`) instead of Sepolia test USDC.
+On 2026-07-27 a payment was quoted for roughly 15,000 COP / ~4.7 USDC on
+`eth-sepolia` at derivation index 5. The payer sent real USDC on Ethereum
+mainnet (contract `0xa0b86991…3606eb48`) to that deposit address instead of
+Sepolia test USDC — and underpaid by ~13% relative to the quote.
 
 Two independent failures, either of which alone was fatal:
 
 1. Wrong chain. The watcher only subscribes to the Sepolia contract on chain
    11155111. Mainnet is not a served network, so detection was structurally
    impossible.
-2. Underpaid by 0.6 USDC (12.7%), far outside the 0.5% dust tolerance.
+2. Underpaid far outside the 0.5% dust tolerance.
 
-The money is still sitting at that address, unswept, with no native balance for
-gas. **That stranded balance is the exact failure mode this plan removes.**
+The money sat at that address, unswept, with no native balance for gas.
+**That stranded balance is the exact failure mode this plan removes.**
 
 It also demonstrates the systemic property that makes sweeping urgent: because
 the same BIP-32 key produces the same address on every EVM chain, a deposit

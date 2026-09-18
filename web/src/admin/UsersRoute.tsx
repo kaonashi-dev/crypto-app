@@ -154,7 +154,7 @@ export function UsersRoute() {
               <footer class="border-t border-hairline px-4 py-2.5 text-[0.7rem] leading-relaxed text-ink-3">
                 Accounts are created by the server at boot:{" "}
                 <span class="font-mono text-ink-2">ADMIN_USER</span> (default{" "}
-                <span class="font-mono text-ink-2">samuel</span>) with the password in{" "}
+                <span class="font-mono text-ink-2">admin</span>) with the password in{" "}
                 <span class="font-mono text-ink-2">ADMIN_PASSWORD</span>, which is also how a
                 password is reset — change it and restart, and that operator's open sessions are
                 revoked. The console itself grants nothing: it can create merchants, but not

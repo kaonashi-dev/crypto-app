@@ -19,7 +19,7 @@
  *    ends the session.
  *
  * `ADMIN_PASSWORD` stays the way in: `bootstrapOperator()` keeps one account —
- * `ADMIN_USER`, default `samuel` — in step with it on every boot. That is what
+ * `ADMIN_USER`, default `admin` — in step with it on every boot. That is what
  * makes the environment a recovery path for a deployment nobody can sign in to,
  * and it is why the preflight still refuses to start production without it.
  */

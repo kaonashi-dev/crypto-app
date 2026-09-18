@@ -21,7 +21,7 @@ to maintain.
 |---|---|
 | `DATABASE_URL` | Railway's variable reference to the linked Postgres service's connection string, so it tracks the database service automatically |
 | `HD_MNEMONIC` | its own mnemonic from `bun run mnemonic:new`, quoted — not the one your local `.env` uses, and not a published test phrase |
-| `ADMIN_PASSWORD` | a generated password for the console operator (`ADMIN_USER`, default `samuel`); the boot refuses to start in production without it |
+| `ADMIN_PASSWORD` | a generated password for the console operator (`ADMIN_USER`, default `admin`); the boot refuses to start in production without it |
 | `ALCHEMY_SEPOLIA_KEY`, `ALCHEMY_BASE_SEPOLIA_KEY`, … | your Alchemy key per network you want detected |
 | `PUBLIC_BASE_URL` | optional; pins `checkout_url`s to a custom domain, no trailing slash |
 

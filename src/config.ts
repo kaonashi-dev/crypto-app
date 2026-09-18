@@ -62,7 +62,7 @@ export const env = {
   // environment stays the way you recover access to a deployment. Optional in
   // development, required in production — the preflight refuses to boot without
   // it, and without it the console has no account to sign in to at all.
-  adminUser: (Bun.env.ADMIN_USER || "samuel").trim().toLowerCase(),
+  adminUser: (Bun.env.ADMIN_USER || "admin").trim().toLowerCase(),
   adminPassword: Bun.env.ADMIN_PASSWORD || null,
   // How long a console sign-in lasts. Short by default: the session is a
   // cross-merchant view of every payment, and an unattended browser should stop

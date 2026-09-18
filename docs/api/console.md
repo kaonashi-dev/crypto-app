@@ -43,7 +43,7 @@ below).
 `GET /admin/api/auth/me` responses:
 
 ```json
-{ "authenticated": true, "mode": "session", "user": { "id": "...", "username": "samuel" }, "session_ttl_hours": 12 }
+{ "authenticated": true, "mode": "session", "user": { "id": "...", "username": "admin" }, "session_ttl_hours": 12 }
 ```
 
 `mode` is `"open"` when the console has no `ADMIN_PASSWORD` configured

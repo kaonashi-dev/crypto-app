@@ -55,7 +55,7 @@ Collection variables to set first:
 |---|---|
 | `baseUrl` | `http://localhost:3000` for local |
 | `apiKey` | from `bun run seed`, printed once |
-| `adminUser` / `adminPassword` | the console operator (`ADMIN_USER`, default `samuel`) and `ADMIN_PASSWORD` — run the Console folder's "Sign in" request once first |
+| `adminUser` / `adminPassword` | the console operator (`ADMIN_USER`, default `admin`) and `ADMIN_PASSWORD` — run the Console folder's "Sign in" request once first |
 | `publicId` | leave empty; "Create payment" fills it, so later requests follow the payment you just made |
 
 Auth is set per folder: Merchant API sends `X-Api-Key`, the Console signs in

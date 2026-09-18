@@ -131,7 +131,7 @@ export const webhookJobs = pgTable("webhook_jobs", {
 // cross-merchant — conflating the two would make every merchant an operator.
 export const adminUsers = pgTable("admin_users", {
   id: uuid("id").primaryKey().defaultRandom(),
-  // Stored lower-cased and compared as stored, so "Samuel" and "samuel" are one
+  // Stored lower-cased and compared as stored, so "Admin" and "admin" are one
   // account rather than two the unique index would happily keep apart.
   username: text("username").notNull(),
   // Argon2id PHC string (see services/admin-auth.ts). Never a plaintext password

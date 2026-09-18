@@ -51,7 +51,7 @@ wrong for the thing an operator reuses, unlike a 24-byte random API key where SH
 fine.
 
 `bootstrapOperator()` (`services/admin-auth.ts`) runs on every boot and keeps exactly one
-account — `ADMIN_USER` (default `samuel`) — in step with `ADMIN_PASSWORD`:
+account — `ADMIN_USER` (default `admin`) — in step with `ADMIN_PASSWORD`:
 
 - **No account yet** → creates it.
 - **Password differs from the hash on file** → rotates the hash, and **revokes every open

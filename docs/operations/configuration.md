@@ -69,7 +69,7 @@ just has nothing watching it, and the boot names it in a warning.
 
 | Variable | Default | Meaning | Preflight rule |
 |---|---|---|---|
-| `ADMIN_USER` | `samuel` | Bootstrap operator username. Lower-cased and trimmed. | none |
+| `ADMIN_USER` | `admin` | Bootstrap operator username. Lower-cased and trimmed. | none |
 | `ADMIN_PASSWORD` | unset (`null`) | Bootstrap operator's password, reapplied to `admin_users` on every boot by `bootstrapOperator()`. Also what gates the console's write surface (`requireOperator`). | **Required in production** (`env.isProduction`) — missing → fatal exit. Optional locally: unset means the console runs open for reads and refuses every write with `403 auth_required_for_mutation`. |
 | `ADMIN_SESSION_TTL_HOURS` | `12` | How long a console session cookie lasts, sliding while in use. | none |
 | `PUBLIC_BASE_URL` | unset (`null`) | Pins `checkout_url` to a fixed origin instead of deriving it from `X-Forwarded-*` headers. No trailing slash. | none |

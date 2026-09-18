@@ -187,7 +187,7 @@ So live `POST /api/payments` fails at the quote step.
 add a fallback rate source / USD→COP FX; or seed the rate cache for demos.
 
 ### 7.2 Alchemy networks not enabled on the app
-The key is **valid** and authenticates to app `fr6vbjctcxwfepig`, but the networks are off:
+The key is **valid** and authenticates to the Alchemy app, but the networks are off:
 
 ```
 eth-sepolia  -> "ETH_SEPOLIA is not enabled for this app."
@@ -195,9 +195,9 @@ base-sepolia -> "BASE_SEPOLIA is not enabled for this app."
 ```
 
 So the watcher/confirmer can't observe on-chain `Transfer` events.
-**Fix:** enable **Ethereum Sepolia** and **Base Sepolia** at
-`https://dashboard.alchemy.com/apps/fr6vbjctcxwfepig/networks` (one key serves both once
-enabled — the same key in both env vars is fine).
+**Fix:** enable **Ethereum Sepolia** and **Base Sepolia** in the Alchemy
+dashboard for that app (one key serves both once enabled — the same key in
+both env vars is fine).
 
 ---
 
